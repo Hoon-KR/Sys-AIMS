@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sys-aims-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sys-aims-backend
+  template:
+    metadata:
+      labels:
+        app: sys-aims-backend
+    spec:
+      containers:
+        - name: backend
+          image: yeohoon777/sys-aims-backend:latest
+          ports:
+            - containerPort: 8000
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"

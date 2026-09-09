@@ -17,6 +17,12 @@ spec:
           image: yeohoon777/sys-aims-backend:latest
           ports:
             - containerPort: 8000
+          envFrom:
+            - secretRef:
+                name: postgres-secret
+          env:
+            - name: POSTGRES_HOST
+              value: postgres-service
           resources:
             requests:
               cpu: "50m"

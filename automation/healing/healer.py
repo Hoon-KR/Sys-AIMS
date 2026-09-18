@@ -10,6 +10,9 @@ healer 코드에서도 같은 제한을 한 번 더 건다 (심층 방어).
   GET  /status  서킷/이력 조회
   GET  /health  헬스체크
 
+모든 요청/결과/서킷 변화는 <EVENT_LOG_DIR>/healer.jsonl 에도 남는다 (common.eventlog).
+컨테이너를 재생성해도 이력이 유지된다.
+
 응답 코드
   200 재기동 + healthy 확인 완료   403 허용되지 않은 컨테이너   401 인증 실패
   409 쿨다운 중(중복 요청)          429 서킷 열림(자동 복구 중단)
@@ -26,6 +29,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from common import slack
+from common.eventlog import EventLog
 
 TARGET_CONTAINER = os.environ["TARGET_CONTAINER"]
 TOKEN = os.environ["HEALER_TOKEN"]
@@ -41,10 +45,11 @@ STATE_FILE = pathlib.Path(os.environ.get("STATE_FILE", "/data/state.json"))
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
 
 _lock = threading.Lock()
+EVENTS = EventLog("healer")
 
 
 def log(event, **fields):
-    print(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "event": event, **fields}, ensure_ascii=False), flush=True)
+    EVENTS.write(event, **fields)
 
 
 # ---------------------------------------------------------------- state
@@ -199,7 +204,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    log("healer.started", target=TARGET_CONTAINER, max_restarts=MAX_RESTARTS,
+    log("healer.started", event_log=str(EVENTS.path), target=TARGET_CONTAINER, max_restarts=MAX_RESTARTS,
         window_seconds=WINDOW_SECONDS, cooldown_seconds=COOLDOWN_SECONDS, circuit_open=load_state()["circuit_open"])
     ThreadingHTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
 

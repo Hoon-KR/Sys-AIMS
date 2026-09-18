@@ -18,6 +18,7 @@ pitwall_web 다운
 | 구성 요소 | 위치 |
 |---|---|
 | healer 코드 | `automation/healing/healer.py` (Python 표준 라이브러리만 사용, 비root, read-only FS) |
+| 이벤트 이력 | 볼륨 `automation_data`의 `/data/events/healer.jsonl` (아래 참고) |
 | Webhook 스크립트 | `zabbix/mediatypes/healer.js`, `slack.js` |
 | Zabbix 설정 | `scripts/zabbix_config.py` → export 결과 `zabbix/templates/mediatypes.yaml`, `automation.json` |
 | socket-proxy 허용 범위 | [ADR-0001](adr/0001-docker-socket-access.md) |
@@ -48,7 +49,7 @@ pitwall_web 다운
 |---|---|---|
 | **서킷 브레이커** | 컨테이너별로 **600초 안에 3회**까지 재기동합니다. 4번째 요청부터 `429`로 거부하고 Slack을 보냅니다. | 계속 죽는 컨테이너를 무한히 되살리지 않습니다. |
 | **수동 해제** | 서킷은 자동으로 닫히지 않습니다. 사람이 `POST /reset`으로 풀어야 합니다. | 시간이 지나 자동으로 풀리면 "3회 → 대기 → 3회"가 반복되는 느린 루프가 됩니다. |
-| **상태 영속화** | 서킷 상태를 named volume(`/data/state.json`)에 저장합니다. | healer가 재시작되어도 서킷이 풀리지 않습니다. |
+| **상태 영속화** | 서킷 상태를 named volume(`automation_data`의 `/data/state.json`)에 저장합니다. | healer가 재시작되어도 서킷이 풀리지 않습니다. |
 | **쿨다운** | 같은 컨테이너에 대해 60초 안에 들어온 재요청은 `409`로 무시합니다. | 중복 이벤트로 인한 연속 재기동을 막습니다. |
 | **Action 1회 실행** | 에스컬레이션 1단계에서만 healer를 호출합니다. 반복하지 않습니다. | 같은 문제가 열려 있는 동안에는 다시 호출하지 않습니다. |
 
@@ -71,6 +72,54 @@ pitwall_web 다운
 docker exec healer python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8080/status').read().decode())"
 docker exec healer python -c "import os,urllib.request;urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8080/reset',method='POST',headers={'Authorization':'Bearer '+os.environ['HEALER_TOKEN']}))"
 ```
+
+---
+
+## 이벤트 이력 (JSON Lines)
+
+healer의 모든 요청, 결과, 서킷 변화는 볼륨 `automation_data`의 **`/data/events/healer.jsonl`**에 남습니다.
+`docker logs`는 컨테이너를 재생성하면 사라지지만, 이 파일은 **이미지를 재빌드하거나 컨테이너를 재생성해도 유지**됩니다.
+
+| 항목 | 내용 |
+|---|---|
+| 형식 | 한 줄 = 한 이벤트 (JSON). 공통 필드는 `v`(스키마 버전), `ts`, `epoch`, `source`, `event` |
+| 파일 | 쓰는 주체별로 나눕니다: `healer.jsonl`, (예정) `rca.jsonl`. 여러 프로세스가 한 파일을 로테이트하면 경합이 생기기 때문입니다. |
+| 연결 키 | `event_id`(Zabbix 이벤트 ID). 같은 장애에 대한 healer 기록과 RCA 기록을 이 키로 묶습니다. |
+| 크기 제한 | 크기 기반 로테이션 5MB × 5개(`EVENT_LOG_MAX_BYTES`, `EVENT_LOG_BACKUPS`). 쓰는 주체당 최대 약 30MB입니다. |
+| 실패 시 | 파일 기록이 실패해도 복구 작업은 계속됩니다. stdout(`docker logs`)에는 항상 같은 줄이 남습니다. |
+| 구현 | `automation/common/eventlog.py`. RCA도 같은 모듈을 사용합니다. |
+
+**healer 이벤트 종류**
+
+| event | 의미 |
+|---|---|
+| `heal.requested` | 재기동 요청을 받음 |
+| `heal.succeeded` | 재기동하고 healthy 확인까지 완료 |
+| `heal.failed` | 재기동했지만 healthy 확인에 실패 |
+| `heal.skipped` | 쿨다운 중이라 무시 |
+| `heal.blocked` | 서킷이 열려 있어 거부 |
+| `heal.rejected` | 허용되지 않은 컨테이너 |
+| `auth.failed` | 토큰 인증 실패 |
+| `circuit.opened` / `circuit.reset` | 서킷 열림 / 수동 해제 |
+| `healer.started` | healer 기동 |
+
+```bash
+# 원본 보기
+docker exec healer cat /data/events/healer.jsonl
+
+# 집계 예: 이벤트 종류별 건수 (로테이트된 파일 포함)
+docker exec healer sh -c 'cat /data/events/healer.jsonl*' | python3 -c "
+import sys, json, collections
+print(collections.Counter(json.loads(l)['event'] for l in sys.stdin))"
+
+# 로컬로 복사 (logs/ 는 gitignore 대상)
+docker cp healer:/data/events ./logs/events
+```
+
+**검증 (2026-09-18)**
+- **로테이션**: 한도를 400B × 2개로 낮춘 임시 컨테이너에서 30건을 기록했습니다. 파일은 3개(각 368B)만 남았고, 최신 기록(seq 29)은 현재 파일에 있으며, 모든 줄이 유효한 JSON이었습니다.
+- **실제 장애 기록**: `pitwall_web`을 중지하자 30초 만에 자동 복구되었고, `heal.requested`와 `heal.succeeded`(event_id 184, 5.2초)가 기록되었습니다.
+- **재생성 후 보존**: `--build --force-recreate`로 컨테이너가 새로 만들어졌습니다. 새 컨테이너의 `docker logs`에는 복구 이벤트가 0건이지만, 파일에는 event 184 기록이 그대로 남아 있었습니다.
 
 ---
 

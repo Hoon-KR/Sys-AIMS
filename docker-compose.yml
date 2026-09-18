@@ -274,12 +274,15 @@ services:
       SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
       DOCKER_PROXY_HOST: socket-proxy
       STATE_FILE: /data/state.json
+      # 재기동/서킷 이력 (JSON Lines, 5MB × 5 로테이션). RCA도 같은 디렉터리에 rca.jsonl 로 남긴다.
+      EVENT_LOG_DIR: /data/events
       TZ: ${TZ:?TZ is required}
     volumes:
-      # 서킷 상태 보존용. bind mount 대신 named volume을 쓰는 이유:
+      # 서킷 상태 + 이벤트 이력 보존용 (컨테이너/이미지를 재생성해도 유지).
+      # bind mount 대신 named volume을 쓰는 이유:
       # 리눅스에서 docker가 만든 bind 디렉터리는 root 소유라 비root(10001) 프로세스가 쓸 수 없다.
       # named volume은 이미지의 /data 소유권(app)을 그대로 이어받는다.
-      - healer_state:/data
+      - automation_data:/data
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -315,4 +318,4 @@ networks:
   egress:
 
 volumes:
-  healer_state:
+  automation_data:

@@ -1,0 +1,67 @@
+# =============================================================
+# Sys-AIMS .gitignore
+# 원칙: 민감정보와 런타임 산출물은 절대 커밋하지 않는다.
+# =============================================================
+
+# ---------- 환경변수 / 시크릿 ----------
+.env
+.env.*
+!.env.example
+*.secret
+secrets/
+
+# ---------- 키 / 인증서 ----------
+*.pem
+*.key
+*.crt
+*.csr
+*.p12
+*.pfx
+*.der
+id_rsa*
+id_ed25519*
+
+# Let's Encrypt (certbot 컨테이너가 런타임에 생성)
+certbot/
+
+# ---------- 런타임 볼륨 데이터 ----------
+# Zabbix Server / PostgreSQL 볼륨 (컨테이너가 런타임에 생성)
+zbx_env/
+
+# ---------- 산출물 ----------
+# AI 일일점검 보고서 (디렉터리 유지용 .gitkeep만 커밋)
+reports/*
+!reports/.gitkeep
+
+# 런타임 로그
+logs/*
+!logs/.gitkeep
+*.log
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# ---------- Docker ----------
+docker-compose.override.yml
+
+# ---------- OS / 에디터 ----------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*~

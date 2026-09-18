@@ -1,0 +1,93 @@
+zabbix_export:
+  version: '7.0'
+  media_types:
+    - name: 'Sys-AIMS Healer'
+      type: WEBHOOK
+      parameters:
+        - name: container
+          value: '{EVENT.TAGS.container}'
+        - name: event_id
+          value: '{EVENT.ID}'
+        - name: host
+          value: '{HOST.HOST}'
+        - name: token
+          value: '{$HEALER.TOKEN}'
+        - name: trigger
+          value: '{EVENT.NAME}'
+        - name: url
+          value: 'http://healer:8080/heal'
+      attempts: '1'
+      script: |
+        // Sys-AIMS Healer webhook — Zabbix Action → healer POST /heal
+        // 파라미터: url, token({$HEALER.TOKEN}), container({EVENT.TAGS.container}), event_id, host, trigger
+        // healer가 2xx가 아니면 예외를 던져 Action 상태를 Failed로 남긴다 (이벤트 화면에 오류 표시).
+        var params = JSON.parse(value);
+        
+        if (!params.container || params.container.indexOf('{') === 0) {
+            throw 'event has no "container" tag — nothing to heal';
+        }
+        
+        var request = new HttpRequest();
+        request.addHeader('Content-Type: application/json');
+        request.addHeader('Authorization: Bearer ' + params.token);
+        
+        var body = JSON.stringify({
+            container: params.container,
+            event_id: params.event_id,
+            host: params.host,
+            trigger: params.trigger
+        });
+        
+        var response = request.post(params.url, body);
+        var status = request.getStatus();
+        Zabbix.log(4, '[Sys-AIMS Healer] HTTP ' + status + ' ' + response);
+        
+        if (status < 200 || status >= 300) {
+            throw 'healer HTTP ' + status + ': ' + response;
+        }
+        return response;
+      timeout: 45s
+      description: 'Zabbix Action → healer POST /heal (docs/self-healing.md)'
+      message_templates:
+        - event_source: TRIGGERS
+          operation_mode: PROBLEM
+          subject: 'heal {EVENT.ID}'
+          message: '{EVENT.NAME}'
+    - name: 'Sys-AIMS Slack'
+      type: WEBHOOK
+      parameters:
+        - name: message
+          value: '{ALERT.MESSAGE}'
+        - name: subject
+          value: '{ALERT.SUBJECT}'
+        - name: url
+          value: '{$SLACK.WEBHOOK}'
+      script: |
+        // Sys-AIMS Slack webhook — Incoming Webhook으로 알림 전송
+        // 파라미터: url({$SLACK.WEBHOOK}), subject({ALERT.SUBJECT}), message({ALERT.MESSAGE})
+        // healer가 죽었을 때도 사람에게 알릴 수 있도록 Zabbix가 직접 보낸다 (에스컬레이션 2단계).
+        var params = JSON.parse(value);
+        
+        var request = new HttpRequest();
+        request.addHeader('Content-Type: application/json');
+        
+        var response = request.post(params.url, JSON.stringify({ text: '*' + params.subject + '*\n' + params.message }));
+        var status = request.getStatus();
+        
+        if (status !== 200) {
+            throw 'Slack HTTP ' + status + ': ' + response;
+        }
+        return 'OK';
+      timeout: 10s
+      description: 'Slack Incoming Webhook — 자동 복구 미해소 시 사람 호출 (에스컬레이션)'
+      message_templates:
+        - event_source: TRIGGERS
+          operation_mode: PROBLEM
+          subject: ':rotating_light: [Sys-AIMS] 자동 복구 후에도 미해소 — 사람 개입 필요'
+          message: |
+            문제: {EVENT.NAME} ({EVENT.SEVERITY})
+            호스트: {HOST.NAME}
+            발생: {EVENT.DATE} {EVENT.TIME} (경과 {EVENT.AGE})
+            상태: {EVENT.OPDATA}
+            Event ID: {EVENT.ID}
+            healer 응답/서킷 상태를 확인하세요 (docs/self-healing.md)

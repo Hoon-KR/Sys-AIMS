@@ -1,0 +1,61 @@
+{
+  "usergroup": {
+    "name": "Sys-AIMS Automation",
+    "gui_access": "3",
+    "hostgroup_rights": [
+      {
+        "hostgroup": "Sys-AIMS",
+        "permission": "2"
+      }
+    ]
+  },
+  "user": {
+    "username": "sys-aims-bot",
+    "role": "User role",
+    "usergroups": [
+      "Sys-AIMS Automation"
+    ],
+    "medias": [
+      {
+        "mediatype": "Sys-AIMS Healer",
+        "sendto": "healer"
+      },
+      {
+        "mediatype": "Sys-AIMS Slack",
+        "sendto": "slack"
+      }
+    ]
+  },
+  "action": {
+    "name": "Sys-AIMS Self-Healing",
+    "eventsource": "0",
+    "status": "0",
+    "esc_period": "5m",
+    "conditions": [
+      {
+        "conditiontype": "26",
+        "operator": "0",
+        "value": "auto",
+        "value2": "healing"
+      }
+    ],
+    "operations": [
+      {
+        "esc_step_from": "1",
+        "esc_step_to": "1",
+        "mediatype": "Sys-AIMS Healer",
+        "users": [
+          "sys-aims-bot"
+        ]
+      },
+      {
+        "esc_step_from": "2",
+        "esc_step_to": "2",
+        "mediatype": "Sys-AIMS Slack",
+        "users": [
+          "sys-aims-bot"
+        ]
+      }
+    ]
+  }
+}

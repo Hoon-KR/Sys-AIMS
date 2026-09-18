@@ -4,6 +4,21 @@ zabbix_export:
     - uuid: 1f8c05f2e0bf4a699b24bf0da2b80cd9
       name: Sys-AIMS
   hosts:
+    - host: healer
+      name: healer
+      templates:
+        - name: 'Sys-AIMS HTTP Service'
+      groups:
+        - name: Sys-AIMS
+      tags:
+        - tag: role
+          value: automation
+      macros:
+        - macro: '{$HEALING.MODE}'
+          value: 'off'
+        - macro: '{$SERVICE.URL}'
+          value: 'http://healer:8080/health'
+      inventory_mode: DISABLED
     - host: pitwall_web
       name: pitwall_web
       templates:

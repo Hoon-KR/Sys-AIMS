@@ -60,7 +60,7 @@ host.get → "Zabbix server" 의 interfaces: 127.0.0.1:10050, available=2 (연�
 
 ## 4. 🔴 [미해결] 컨테이너 재기동 후 HTTP 체크가 1~2회 더 실패한다
 
-- **상태**: 미해결. Self-Healing 단계에서 다시 조사합니다.
+- **상태**: 미해결. Self-Healing 단계(2026-09-18)에서는 **재현만 확인**했고 원인 조사는 하지 않았습니다. 아래 "다음에 확인할 것"부터 이어서 진행합니다.
 - **증상**: `docker start pitwall_web` 이후 Zabbix HTTP agent가 1~2회(15~30초) 더 `0`을 기록합니다.
   그 결과 복구 확인 시간이 설계 기대치(15초 이내)보다 길고 편차가 큽니다.
   5회 측정값은 9.5 / 14.2 / 29.8 / 29.8 / 44.9초입니다([zabbix-monitoring.md](zabbix-monitoring.md#측정-결과-장애-감지-및-복구-확인-시간)).
@@ -75,6 +75,7 @@ host.get → "Zabbix server" 의 interfaces: 127.0.0.1:10050, available=2 (연�
   - Docker 내장 DNS 등록이나 nginx 기동이 늦은 것은 아닙니다.
 - 재현이 일정하지 않습니다. 중지 20초 후 수동으로 재기동했을 때는 다음 체크에서 바로 `200`이 나왔습니다.
 - zabbix-server 이미지의 libcurl 버전은 `8.21.0`입니다.
+- **Self-Healing 측정에서도 재현됐습니다(2026-09-18).** healer가 재기동을 마친 뒤에도 Zabbix 복구 이벤트까지 **10~45초가 더 걸렸습니다**(재기동 완료 평균 24.8초, Zabbix 복구 확인 평균 45.8초, [self-healing.md](self-healing.md)). 멈춰 있던 시간이 짧아도 발생합니다.
 - 컨테이너가 멈춘 동안의 오류는 `Could not resolve host: pitwall_web`입니다. 연결 거부가 아니라 DNS 조회 실패입니다.
 
 **가설 (미검증)**
@@ -87,6 +88,14 @@ host.get → "Zabbix server" 의 interfaces: 127.0.0.1:10050, available=2 (연�
    지금은 전처리가 오류를 `0`으로 바꿔서 원래 메시지가 남지 않습니다.
 2. `docker stop`/`start` 전후로 컨테이너 IP가 바뀌는지 기록해, IP 변경과 실패가 관련 있는지 확인합니다.
 3. 가설이 맞다면 대응책을 검토합니다. 예: compose에서 고정 IP를 할당하거나, 복구 조건을 확인하는 방식을 바꾸는 것.
+
+---
+
+## 5. export한 미디어 타입을 다시 import하면 스크립트가 달라진다
+
+- **증상**: 새 Zabbix에 import한 뒤 다시 export하면 `mediatypes.yaml`만 원본과 다릅니다.
+- **원인**: `zabbix/mediatypes/*.js` 파일은 끝에 줄바꿈이 있습니다. `apply`는 이 줄바꿈을 그대로 보내지만, YAML literal block은 import할 때 마지막 빈 줄을 지웁니다.
+- **해결**: `apply`에서 스크립트 끝의 공백을 제거(`rstrip()`)합니다. 이렇게 하면 두 경로의 결과가 같아집니다. 수정 후 새 Zabbix에서 다시 검증해 4개 파일이 모두 동일함을 확인했습니다.
 
 ---
 

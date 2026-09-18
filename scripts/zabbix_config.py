@@ -2,24 +2,33 @@
 """Sys-AIMS Zabbix 설정 관리 (Zabbix API 전용, 웹 UI 수동 설정 금지).
 
   apply   현재 Zabbix에 설정을 적용한다 (반복 실행해도 결과 동일)
-  export  zabbix/templates/*.yaml 로 내보낸다 (커밋 대상)
-  import  YAML을 가져와 새 환경(EC2 등)에 재현한다
+  export  zabbix/templates/ 로 내보낸다 (커밋 대상)
+  import  export 파일을 가져와 새 환경(EC2 등)에 재현한다
 
 인증: 환경변수 또는 .env 의 ZABBIX_API_URL / ZABBIX_API_USER / ZABBIX_API_PASSWORD
+비밀값: .env 의 HEALER_TOKEN / SLACK_WEBHOOK_URL 을 Secret 전역 매크로로 주입한다.
+        전역 매크로는 configuration.export 대상이 아니므로 export 파일에 비밀값이 남지 않는다.
 """
 
 import argparse
+import json
 import pathlib
+import secrets
 import sys
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "automation"))
 
-from common.zabbix_api import ZabbixAPI  # noqa: E402
+from common.zabbix_api import ZabbixAPI, load_env  # noqa: E402
 
 EXPORT_DIR = REPO_ROOT / "zabbix" / "templates"
 TEMPLATE_FILE = EXPORT_DIR / "sys-aims-http-service.yaml"
 HOSTS_FILE = EXPORT_DIR / "hosts.yaml"
+MEDIATYPES_FILE = EXPORT_DIR / "mediatypes.yaml"
+# Zabbix configuration.export는 Action/사용자/사용자 그룹을 지원하지 않는다.
+# 그래서 이름 기반(ID 없음)으로 정규화한 JSON을 직접 내보내고 가져온다.
+AUTOMATION_FILE = EXPORT_DIR / "automation.json"
+MEDIATYPE_SCRIPTS = REPO_ROOT / "zabbix" / "mediatypes"
 
 HOST_GROUP = "Sys-AIMS"
 TEMPLATE_GROUP = "Templates/Sys-AIMS"
@@ -38,6 +47,9 @@ TEMPLATE_MACROS = [
     {"macro": "{$SERVICE.URL}", "value": "http://localhost/", "description": "감시 대상 URL (호스트에서 재정의)"},
     {"macro": "{$HTTP.CHECK.INTERVAL}", "value": "15s", "description": "HTTP 체크 주기"},
     {"macro": "{$HTTP.CHECK.TIMEOUT}", "value": "5s", "description": "HTTP 응답 타임아웃"},
+    # 트리거 태그 healing 의 값. 호스트에서 off 로 재정의하면 자동 복구 대상에서 빠진다
+    # (예: healer 자신 — healer가 자기 자신을 고치려 하면 안 된다).
+    {"macro": "{$HEALING.MODE}", "value": "auto", "description": "자동 복구 여부 (auto | off)"},
 ]
 HTTP_ITEM = {
     "name": "HTTP status code",
@@ -72,11 +84,11 @@ HTTP_TRIGGER = {
     "priority": 4,  # High
     "manual_close": 1,
     "opdata": "Status: {ITEM.LASTVALUE1}",
-    "comments": "최근 2회 연속 HTTP 200이 아니면 발생 (0 = 연결 실패). healing:auto 태그로 자동 복구 대상.",
+    "comments": "최근 2회 연속 HTTP 200이 아니면 발생 (0 = 연결 실패). healing={$HEALING.MODE} 태그로 자동 복구 여부 결정.",
     "tags": [
         {"tag": "scope", "value": "availability"},
         {"tag": "component", "value": "http"},
-        {"tag": "healing", "value": "auto"},
+        {"tag": "healing", "value": "{$HEALING.MODE}"},
     ],
 }
 
@@ -97,7 +109,98 @@ HOSTS = [
         "tags": [{"tag": "container", "value": "pitwall_web"}],
         "macros": [{"macro": "{$SERVICE.URL}", "value": "http://pitwall_web/"}],
     },
+    {
+        "host": "healer",
+        "templates": [HTTP_TEMPLATE],
+        "interfaces": [],
+        "tags": [{"tag": "role", "value": "automation"}],
+        "macros": [
+            {"macro": "{$SERVICE.URL}", "value": "http://healer:8080/health"},
+            {"macro": "{$HEALING.MODE}", "value": "off"},  # healer는 자동 복구 대상이 아니다
+        ],
+    },
 ]
+
+# ---------------------------------------------------------------
+# Self-Healing: Media type / 전용 사용자 / Action
+# ---------------------------------------------------------------
+HEALER_MEDIA = "Sys-AIMS Healer"
+SLACK_MEDIA = "Sys-AIMS Slack"
+BOT_USERGROUP = "Sys-AIMS Automation"
+BOT_USER = "sys-aims-bot"
+ACTION_NAME = "Sys-AIMS Self-Healing"
+
+GLOBAL_SECRET_MACROS = {  # 매크로 → .env 키
+    "{$HEALER.TOKEN}": "HEALER_TOKEN",
+    "{$SLACK.WEBHOOK}": "SLACK_WEBHOOK_URL",
+}
+
+MEDIA_TYPES = [
+    {
+        "name": HEALER_MEDIA,
+        "script_file": "healer.js",
+        "description": "Zabbix Action → healer POST /heal (docs/self-healing.md)",
+        # healer는 재기동 후 healthy 확인까지 최대 30초를 쓴다
+        "timeout": "45s",
+        # 재시도는 1회: 재시도/차단 정책은 healer의 서킷 브레이커 한 곳에서만 관리한다
+        "maxattempts": "1",
+        "parameters": [
+            {"name": "url", "value": "http://healer:8080/heal"},
+            {"name": "token", "value": "{$HEALER.TOKEN}"},
+            {"name": "container", "value": "{EVENT.TAGS.container}"},
+            {"name": "event_id", "value": "{EVENT.ID}"},
+            {"name": "host", "value": "{HOST.HOST}"},
+            {"name": "trigger", "value": "{EVENT.NAME}"},
+        ],
+        "message_templates": [
+            {"eventsource": "0", "recovery": "0", "subject": "heal {EVENT.ID}", "message": "{EVENT.NAME}"},
+        ],
+    },
+    {
+        "name": SLACK_MEDIA,
+        "script_file": "slack.js",
+        "description": "Slack Incoming Webhook — 자동 복구 미해소 시 사람 호출 (에스컬레이션)",
+        "timeout": "10s",
+        "maxattempts": "3",
+        "parameters": [
+            {"name": "url", "value": "{$SLACK.WEBHOOK}"},
+            {"name": "subject", "value": "{ALERT.SUBJECT}"},
+            {"name": "message", "value": "{ALERT.MESSAGE}"},
+        ],
+        "message_templates": [
+            {
+                "eventsource": "0", "recovery": "0",
+                "subject": ":rotating_light: [Sys-AIMS] 자동 복구 후에도 미해소 — 사람 개입 필요",
+                "message": "문제: {EVENT.NAME} ({EVENT.SEVERITY})\n"
+                           "호스트: {HOST.NAME}\n"
+                           "발생: {EVENT.DATE} {EVENT.TIME} (경과 {EVENT.AGE})\n"
+                           "상태: {EVENT.OPDATA}\n"
+                           "Event ID: {EVENT.ID}\n"
+                           "healer 응답/서킷 상태를 확인하세요 (docs/self-healing.md)",
+            },
+        ],
+    },
+]
+
+# 이름 기반 선언 — apply 와 import(automation.json) 가 같은 함수로 적용한다
+AUTOMATION = {
+    "usergroup": {"name": BOT_USERGROUP, "gui_access": "3", "hostgroup_rights": [{"hostgroup": HOST_GROUP, "permission": "2"}]},
+    "user": {"username": BOT_USER, "role": "User role", "usergroups": [BOT_USERGROUP],
+             "medias": [{"mediatype": HEALER_MEDIA, "sendto": "healer"}, {"mediatype": SLACK_MEDIA, "sendto": "slack"}]},
+    "action": {
+        "name": ACTION_NAME,
+        "eventsource": "0",
+        "status": "0",
+        # 1단계(즉시) → healer 호출, 5분 뒤에도 문제가 열려 있으면 2단계 → Slack
+        "esc_period": "5m",
+        # 조건은 트리거 이름이 아니라 태그: healing=auto 인 이벤트만
+        "conditions": [{"conditiontype": "26", "operator": "0", "value": "auto", "value2": "healing"}],
+        "operations": [
+            {"esc_step_from": "1", "esc_step_to": "1", "mediatype": HEALER_MEDIA, "users": [BOT_USER]},
+            {"esc_step_from": "2", "esc_step_to": "2", "mediatype": SLACK_MEDIA, "users": [BOT_USER]},
+        ],
+    },
+}
 
 
 def log(msg):
@@ -185,12 +288,125 @@ def fix_default_server_host(api):
         api.call("hostinterface.delete", agent_ifaces)
 
 
+def ensure_global_secret_macros(api):
+    env = load_env()
+    for macro, env_key in GLOBAL_SECRET_MACROS.items():
+        value = env.get(env_key, "")
+        if not value:
+            log(f"WARN: {env_key} is empty — {macro} not set")
+            continue
+        found = api.call("usermacro.get", {"globalmacro": True, "filter": {"macro": macro}, "output": ["globalmacroid"]})
+        params = {"value": value, "type": 1, "description": f"from .env {env_key} (secret)"}
+        if found:
+            api.call("usermacro.updateglobal", {"globalmacroid": found[0]["globalmacroid"], **params})
+        else:
+            log(f"create secret global macro {macro}")
+            api.call("usermacro.createglobal", {"macro": macro, **params})
+
+
+def ensure_media_types(api):
+    for spec in MEDIA_TYPES:
+        params = {k: v for k, v in spec.items() if k != "script_file"}
+        params.update({"type": 4, "script": (MEDIATYPE_SCRIPTS / spec["script_file"]).read_text().rstrip(), "status": 0})
+        found = api.call("mediatype.get", {"filter": {"name": spec["name"]}, "output": ["mediatypeid"]})
+        if found:
+            api.call("mediatype.update", {"mediatypeid": found[0]["mediatypeid"], **params})
+        else:
+            log(f"create media type '{spec['name']}'")
+            api.call("mediatype.create", params)
+
+
+def _id(api, method, field, name, key):
+    found = api.call(f"{method}.get", {"filter": {field: [name]}, "output": [key]})
+    if not found:
+        raise SystemExit(f"{method} '{name}' not found")
+    return found[0][key]
+
+
+def ensure_automation(api, spec):
+    ug = spec["usergroup"]
+    ug_params = {"gui_access": ug["gui_access"],
+                 "hostgroup_rights": [{"id": _id(api, "hostgroup", "name", r["hostgroup"], "groupid"), "permission": r["permission"]}
+                                      for r in ug["hostgroup_rights"]]}
+    found = api.call("usergroup.get", {"filter": {"name": ug["name"]}, "output": ["usrgrpid"]})
+    if found:
+        api.call("usergroup.update", {"usrgrpid": found[0]["usrgrpid"], **ug_params})
+    else:
+        log(f"create usergroup '{ug['name']}'")
+        api.call("usergroup.create", {"name": ug["name"], **ug_params})
+
+    u = spec["user"]
+    u_params = {
+        "roleid": _id(api, "role", "name", u["role"], "roleid"),
+        "usrgrps": [{"usrgrpid": _id(api, "usergroup", "name", g, "usrgrpid")} for g in u["usergroups"]],
+        "medias": [{"mediatypeid": _id(api, "mediatype", "name", m["mediatype"], "mediatypeid"), "sendto": m["sendto"],
+                    "active": 0, "severity": 63, "period": "1-7,00:00-24:00"} for m in u["medias"]],
+    }
+    found = api.call("user.get", {"filter": {"username": u["username"]}, "output": ["userid"]})
+    if found:
+        api.call("user.update", {"userid": found[0]["userid"], **u_params})
+    else:
+        # 로그인하지 않는 알림 전용 계정 (GUI 접근 비활성). 비밀번호는 저장하지 않는다.
+        log(f"create user '{u['username']}'")
+        api.call("user.create", {"username": u["username"], "passwd": secrets.token_urlsafe(32), **u_params})
+
+    a = spec["action"]
+    a_params = {
+        "status": a["status"],
+        "esc_period": a["esc_period"],
+        "filter": {"evaltype": "0", "conditions": a["conditions"]},
+        "operations": [{
+            "operationtype": "0", "esc_step_from": op["esc_step_from"], "esc_step_to": op["esc_step_to"], "esc_period": "0",
+            "opmessage": {"default_msg": "1", "mediatypeid": _id(api, "mediatype", "name", op["mediatype"], "mediatypeid")},
+            "opmessage_usr": [{"userid": _id(api, "user", "username", name, "userid")} for name in op["users"]],
+        } for op in a["operations"]],
+    }
+    found = api.call("action.get", {"filter": {"name": a["name"]}, "output": ["actionid"]})
+    if found:
+        api.call("action.update", {"actionid": found[0]["actionid"], **a_params})
+    else:
+        log(f"create action '{a['name']}'")
+        api.call("action.create", {"name": a["name"], "eventsource": a["eventsource"], **a_params})
+
+
+def export_automation(api):
+    """live 상태를 이름 기반으로 정규화해 AUTOMATION 과 같은 형태로 만든다."""
+    names = lambda method, key, field, ids: {x[key]: x[field] for x in api.call(f"{method}.get", {f"{key}s": ids, "output": [key, field]})} if ids else {}
+    ug = api.call("usergroup.get", {"filter": {"name": BOT_USERGROUP}, "output": ["name", "gui_access"], "selectHostGroupRights": "extend"})[0]
+    groups = names("hostgroup", "groupid", "name", [r["id"] for r in ug["hostgroup_rights"]])
+    u = api.call("user.get", {"filter": {"username": BOT_USER}, "output": ["username"], "selectRole": ["name"],
+                              "selectUsrgrps": ["name"], "selectMedias": ["mediatypeid", "sendto"]})[0]
+    a = api.call("action.get", {"filter": {"name": ACTION_NAME}, "output": ["name", "eventsource", "status", "esc_period"],
+                                "selectFilter": "extend", "selectOperations": "extend"})[0]
+    mt_ids = [m["mediatypeid"] for m in u["medias"]] + [op["opmessage"]["mediatypeid"] for op in a["operations"]]
+    media = names("mediatype", "mediatypeid", "name", mt_ids)
+    users = names("user", "userid", "username", [x["userid"] for op in a["operations"] for x in op["opmessage_usr"]])
+    sendto = lambda s: s if isinstance(s, str) else s[0]
+    return {
+        "usergroup": {"name": ug["name"], "gui_access": ug["gui_access"],
+                      "hostgroup_rights": [{"hostgroup": groups[r["id"]], "permission": r["permission"]} for r in ug["hostgroup_rights"]]},
+        "user": {"username": u["username"], "role": u["role"]["name"], "usergroups": [g["name"] for g in u["usrgrps"]],
+                 "medias": [{"mediatype": media[m["mediatypeid"]], "sendto": sendto(m["sendto"])} for m in u["medias"]]},
+        "action": {
+            "name": a["name"], "eventsource": a["eventsource"], "status": a["status"], "esc_period": a["esc_period"],
+            "conditions": [{k: c[k] for k in ("conditiontype", "operator", "value", "value2")} for c in a["filter"]["conditions"]],
+            "operations": [{"esc_step_from": op["esc_step_from"], "esc_step_to": op["esc_step_to"],
+                            "mediatype": media[op["opmessage"]["mediatypeid"]],
+                            "users": [users[x["userid"]] for x in op["opmessage_usr"]]}
+                           for op in sorted(a["operations"], key=lambda o: int(o["esc_step_from"]))],
+        },
+    }
+
+
 def cmd_apply(api):
     ensure_http_template(api)
     groupid = ensure_group(api, "hostgroup", HOST_GROUP)
     for spec in HOSTS:
         ensure_host(api, spec, groupid)
     fix_default_server_host(api)
+    ensure_global_secret_macros(api)
+    ensure_media_types(api)
+    ensure_automation(api, AUTOMATION)
 
 
 def cmd_export(api):
@@ -199,7 +415,10 @@ def cmd_export(api):
     TEMPLATE_FILE.write_text(api.call("configuration.export", {"format": "yaml", "options": {"templates": [tid]}}))
     hosts = api.call("host.get", {"filter": {"host": [h["host"] for h in HOSTS]}, "output": ["hostid"]})
     HOSTS_FILE.write_text(api.call("configuration.export", {"format": "yaml", "options": {"hosts": [h["hostid"] for h in hosts]}}))
-    for path in (TEMPLATE_FILE, HOSTS_FILE):
+    media = api.call("mediatype.get", {"filter": {"name": [m["name"] for m in MEDIA_TYPES]}, "output": ["mediatypeid"]})
+    MEDIATYPES_FILE.write_text(api.call("configuration.export", {"format": "yaml", "options": {"mediaTypes": [m["mediatypeid"] for m in media]}}))
+    AUTOMATION_FILE.write_text(json.dumps(export_automation(api), ensure_ascii=False, indent=2) + "\n")
+    for path in (TEMPLATE_FILE, HOSTS_FILE, MEDIATYPES_FILE, AUTOMATION_FILE):
         log(f"wrote {path.relative_to(REPO_ROOT)}")
 
 
@@ -212,15 +431,19 @@ IMPORT_RULES = {
     "triggers": {"createMissing": True, "updateExisting": True, "deleteMissing": True},
     "templateLinkage": {"createMissing": True},
     "valueMaps": {"createMissing": True, "updateExisting": True},
+    "mediaTypes": {"createMissing": True, "updateExisting": True},
 }
 
 
 def cmd_import(api):
     # 템플릿이 먼저 있어야 호스트의 템플릿 연결이 성공한다
-    for path in (TEMPLATE_FILE, HOSTS_FILE):
+    for path in (TEMPLATE_FILE, HOSTS_FILE, MEDIATYPES_FILE):
         log(f"import {path.relative_to(REPO_ROOT)}")
         api.call("configuration.import", {"format": "yaml", "rules": IMPORT_RULES, "source": path.read_text()})
     fix_default_server_host(api)
+    ensure_global_secret_macros(api)
+    log(f"import {AUTOMATION_FILE.relative_to(REPO_ROOT)}")
+    ensure_automation(api, json.loads(AUTOMATION_FILE.read_text()))
 
 
 def main():

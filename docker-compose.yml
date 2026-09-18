@@ -93,6 +93,7 @@ services:
     networks:
       - zbx_db
       - zbx_mon
+      - zbx_heal   # Action webhook → healer 호출용
     healthcheck:
       # 스키마 생성이 끝나야 trapper 포트(10051)가 열린다 → 포트 open = 준비 완료
       test: ["CMD", "nc", "-z", "127.0.0.1", "10051"]
@@ -204,9 +205,114 @@ services:
           memory: 64M
     logging: *default-logging
 
+  # -----------------------------------------------------------
+  # socket-proxy — 원본 Docker 소켓을 가진 유일한 컨테이너 (ADR-0001)
+  # 허용 목록(정규식)에 없는 요청은 모두 거부한다:
+  #   GET  /containers/<TARGET_CONTAINER>/json      (재기동 후 상태 확인)
+  #   POST /containers/<TARGET_CONTAINER>/restart   (재기동)
+  # 정규식은 프록시가 ^...$ 로 감싸 전체 경로 일치로 검사한다 (부분 일치 불가).
+  # 접속은 healer 컨테이너에서만 허용 (-allowfrom), 외부 포트 없음.
+  # -----------------------------------------------------------
+  socket-proxy:
+    image: wollomatic/socket-proxy:1.13.1
+    container_name: socket-proxy
+    restart: unless-stopped
+    command:
+      - "-loglevel=INFO"
+      - "-listenip=0.0.0.0"
+      - "-allowfrom=healer"
+      - "-allowGET=/v1\\.[0-9]+/containers/${TARGET_CONTAINER:?TARGET_CONTAINER is required}/json"
+      - "-allowPOST=/v1\\.[0-9]+/containers/${TARGET_CONTAINER:?TARGET_CONTAINER is required}/restart"
+      - "-allowhealthcheck"
+      - "-watchdoginterval=30"
+      - "-stoponwatchdog"
+    # 이미지는 비root(65534)로 실행된다. 소켓(권한 660)의 소유 그룹을 추가해야 접근 가능:
+    #   Docker Desktop(맥) → root:root  → DOCKER_GID=0
+    #   EC2(Amazon Linux)  → root:docker → DOCKER_GID=$(getent group docker | cut -d: -f3)
+    # (docs/aws-migration.md 참고)
+    group_add:
+      - "${DOCKER_GID:?DOCKER_GID is required}"
+    volumes:
+      # :ro 는 소켓 파일 보호일 뿐 API 제한이 아니다. 제한은 위 허용 목록이 담당한다.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks:
+      - docker_api
+    healthcheck:
+      test: ["CMD", "/healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: 32M
+    logging: *default-logging
+
+  # -----------------------------------------------------------
+  # healer — Zabbix Action(webhook)의 재기동 요청을 처리 (automation/healing)
+  # Docker 접근은 socket-proxy 경유만 가능. 서킷 브레이커로 무한 재기동 방지.
+  # -----------------------------------------------------------
+  healer:
+    build:
+      context: ./automation
+    image: sys-aims/healer:local
+    container_name: healer
+    restart: unless-stopped
+    depends_on:
+      socket-proxy:
+        condition: service_healthy
+    environment:
+      TARGET_CONTAINER: ${TARGET_CONTAINER:?TARGET_CONTAINER is required}
+      HEALER_TOKEN: ${HEALER_TOKEN:?HEALER_TOKEN is required}
+      HEALER_MAX_RESTARTS: ${HEALER_MAX_RESTARTS:?HEALER_MAX_RESTARTS is required}
+      HEALER_WINDOW_SECONDS: ${HEALER_WINDOW_SECONDS:?HEALER_WINDOW_SECONDS is required}
+      HEALER_COOLDOWN_SECONDS: ${HEALER_COOLDOWN_SECONDS:?HEALER_COOLDOWN_SECONDS is required}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      DOCKER_PROXY_HOST: socket-proxy
+      STATE_FILE: /data/state.json
+      TZ: ${TZ:?TZ is required}
+    volumes:
+      # 서킷 상태 보존용. bind mount 대신 named volume을 쓰는 이유:
+      # 리눅스에서 docker가 만든 bind 디렉터리는 root 소유라 비root(10001) 프로세스가 쓸 수 없다.
+      # named volume은 이미지의 /data 소유권(app)을 그대로 이어받는다.
+      - healer_state:/data
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks:
+      - zbx_heal     # zabbix-server → healer
+      - docker_api   # healer → socket-proxy
+      - egress       # Slack 알림
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+    logging: *default-logging
+
 networks:
   # DB 전용 망: 외부 통신 불가. postgres는 이 망에만 존재한다.
   zbx_db:
     internal: true
   # 모니터링 망: server ↔ agent ↔ 대상 서비스
   zbx_mon:
+  # Self-Healing 호출 망: zabbix-server ↔ healer
+  zbx_heal:
+    internal: true
+  # Docker API 망: healer ↔ socket-proxy (소켓 프록시는 이 망에만 존재)
+  docker_api:
+    internal: true
+  # 외부 통신 망: healer의 Slack 알림
+  egress:
+
+volumes:
+  healer_state:

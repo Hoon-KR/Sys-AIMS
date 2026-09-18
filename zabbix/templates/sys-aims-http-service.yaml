@@ -47,16 +47,19 @@ zabbix_export:
               name: '{HOST.NAME}: HTTP service is down'
               opdata: 'Status: {ITEM.LASTVALUE1}'
               priority: HIGH
-              description: '최근 2회 연속 HTTP 200이 아니면 발생 (0 = 연결 실패). healing:auto 태그로 자동 복구 대상.'
+              description: '최근 2회 연속 HTTP 200이 아니면 발생 (0 = 연결 실패). healing={$HEALING.MODE} 태그로 자동 복구 여부 결정.'
               manual_close: 'YES'
               tags:
                 - tag: component
                   value: http
                 - tag: healing
-                  value: auto
+                  value: '{$HEALING.MODE}'
                 - tag: scope
                   value: availability
       macros:
+        - macro: '{$HEALING.MODE}'
+          value: auto
+          description: '자동 복구 여부 (auto | off)'
         - macro: '{$HTTP.CHECK.INTERVAL}'
           value: 15s
           description: 'HTTP 체크 주기'

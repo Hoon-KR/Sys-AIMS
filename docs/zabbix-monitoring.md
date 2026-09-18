@@ -19,6 +19,8 @@ python3 scripts/zabbix_config.py import   # 새 환경(EC2)에 재현
 | 템플릿 `Sys-AIMS HTTP Service` | HTTP 상태 코드 아이템 1개 + 트리거 1개 + 매크로 |
 | 호스트 `zabbix-agent` | `Linux by Zabbix agent` 템플릿, 인터페이스는 DNS 이름 `zabbix-agent:10050` |
 | 호스트 `pitwall_web` | `Sys-AIMS HTTP Service` 템플릿, 인터페이스 없음, 태그 `container=pitwall_web` |
+| 호스트 `healer` | `Sys-AIMS HTTP Service` 템플릿 (`/health` 감시), `{$HEALING.MODE}=off` |
+| Self-Healing Action, 미디어 타입, 전용 사용자 | [self-healing.md](self-healing.md) |
 | 기본 호스트 `Zabbix server` | Linux 템플릿 unlink+clear, agent 인터페이스 제거 ([troubleshooting #1](troubleshooting.md)) |
 
 ### HTTP 체크 아이템 `http.status.code`
@@ -36,7 +38,8 @@ python3 scripts/zabbix_config.py import   # 새 환경(EC2)에 재현
 ```
 - **심각도**: High
 - **수동 닫기**: 허용
-- **태그**: `scope=availability`, `component=http`, `healing=auto`
+- **태그**: `scope=availability`, `component=http`, `healing={$HEALING.MODE}`
+  - 매크로 기본값은 `auto`입니다. 자동 복구에서 제외할 호스트(예: healer)는 `off`로 재정의합니다.
 - 이벤트에는 호스트 태그 `container=<이름>`도 함께 전파됩니다.
 
 ---
@@ -104,3 +107,12 @@ AWS 이전 계획의 전제 조건입니다. 2026-09-18에 검증했습니다.
 6. 임시 인스턴스를 삭제합니다.
 
 → EC2에서는 스택을 기동한 뒤 `import` 한 번이면 동일한 구성이 재현됩니다.
+
+### 재검증 (Self-Healing 추가 후, 2026-09-18)
+- 대상: export 파일 4개(`sys-aims-http-service.yaml`, `hosts.yaml`, `mediatypes.yaml`, `automation.json`)
+- 방법: 새로 설치한 Zabbix에 import → 다시 export → 비교
+  - 비밀값은 더미로 대체해 실제 값이 임시 인스턴스에 들어가지 않게 했습니다.
+- 결과: **4개 파일 모두 완전히 동일**합니다.
+  - 처음에는 `mediatypes.yaml`에서 스크립트 끝 줄바꿈 차이가 있었습니다([troubleshooting #5](troubleshooting.md)).
+  - 이를 수정한 뒤 **완전히 새 인스턴스에서 처음부터** 다시 확인했습니다.
+- Action, 사용자, 사용자 그룹은 Zabbix `configuration.export`가 지원하지 않습니다. 그래서 이름 기반 JSON(`automation.json`)으로 직접 export/import합니다.

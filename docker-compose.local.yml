@@ -1,0 +1,17 @@
+# =============================================================
+# Sys-AIMS — 로컬 개발 override (HTTP, 맥북 M1)
+#
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+#
+# 포트는 127.0.0.1에만 바인딩한다 (같은 네트워크의 다른 기기에 노출 방지).
+# =============================================================
+
+services:
+  zabbix-web:
+    ports:
+      - "127.0.0.1:${ZABBIX_WEB_PORT:?ZABBIX_WEB_PORT is required}:8080"
+
+  pitwall_web:
+    # 장애 주입/복구 확인을 위해 로컬에서 직접 접근
+    ports:
+      - "127.0.0.1:${PITWALL_WEB_PORT:?PITWALL_WEB_PORT is required}:80"

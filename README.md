@@ -36,7 +36,7 @@ Sys-AIMS는 컨테이너 장애를 **감지하고, 스스로 복구하고, 원�
 ```
 
 ### 장애 대응 흐름
-1. Zabbix Agent가 `pitwall_web`의 상태 이상을 감지합니다.
+1. Zabbix Server가 HTTP 체크로 `pitwall_web`의 상태 이상을 감지합니다(Docker 소켓 불필요).
 2. Zabbix Server의 Trigger가 발동하고 Action이 실행됩니다.
 3. **Self-Healing**: 대상 컨테이너를 재기동합니다.
 4. **RCA**: `alertscripts` 래퍼가 `automation/rca`를 호출합니다. 로그를 수집하고 OpenAI로 분석한 뒤 Slack으로 전송합니다.
@@ -72,33 +72,36 @@ Sys-AIMS는 컨테이너 장애를 **감지하고, 스스로 복구하고, 원�
 
 ```
 sys-aims/
-├── .env.example            # 환경변수 템플릿 (키 이름과 설명만)
+├── .env.example              # 환경변수 템플릿 (키 이름과 설명만)
+├── docker-compose.yml        # 공통 base (포트 노출 없음)
+├── docker-compose.local.yml  # 로컬 override (HTTP, 127.0.0.1 바인딩)
 ├── nginx/
-│   ├── snippets/           # 공통 proxy / SSL 설정 조각
+│   ├── snippets/             # 공통 proxy / SSL 설정 조각
 │   └── conf.d/
-│       ├── local/          # HTTP 전용 (개발)
-│       └── prod/           # HTTPS + 리다이렉트 + ACME (운영)
+│       ├── local/            # HTTP 전용 (개발)
+│       └── prod/             # HTTPS + 리다이렉트 + ACME (운영)
 ├── zabbix/
-│   ├── alertscripts/       # Action이 호출하는 래퍼 스크립트
-│   ├── externalscripts/    # 외부 체크 스크립트
-│   ├── agent/              # Agent UserParameter 설정
-│   └── templates/          # 템플릿 / Action export (YAML)
+│   ├── alertscripts/         # Action이 호출하는 래퍼 스크립트
+│   ├── externalscripts/      # 외부 체크 스크립트
+│   ├── agent/                # Agent UserParameter 설정
+│   └── templates/            # 템플릿 / Action export (YAML)
 ├── postgres/
-│   └── init/               # DB 초기화 SQL
+│   └── init/                 # DB 초기화 SQL
 ├── services/
-│   └── pitwall_web/        # 모니터링 대상 샘플 서비스
-├── automation/             # Python 자동화 스크립트
-│   ├── common/             # 설정 로더, Zabbix / OpenAI / Slack 클라이언트
-│   ├── healing/            # 자동 재기동 후속 처리
-│   ├── rca/                # 로그 분석 → Slack
-│   ├── daily_report/       # 일일점검 보고서 생성
-│   ├── prompts/            # LLM 프롬프트 템플릿
-│   ├── cron/               # crontab 정의
+│   └── pitwall_web/          # 모니터링 대상 샘플 서비스
+├── automation/               # Python 자동화 스크립트
+│   ├── common/               # 설정 로더, Zabbix / OpenAI / Slack 클라이언트
+│   ├── healing/              # 자동 재기동 후속 처리
+│   ├── rca/                  # 로그 분석 → Slack
+│   ├── daily_report/         # 일일점검 보고서 생성
+│   ├── prompts/              # LLM 프롬프트 템플릿
+│   ├── cron/                 # crontab 정의
 │   └── tests/
-├── scripts/                # 운영 스크립트 (인증서 발급, DuckDNS 갱신, 배포)
-├── docs/                   # 아키텍처, 런북, AWS 이전 가이드
-├── reports/                # (gitignore) 생성된 보고서
-└── logs/                   # (gitignore) 런타임 로그
+├── scripts/                  # 운영 스크립트 (인증서 발급, DuckDNS 갱신, 배포)
+├── docs/                     # 아키텍처, 런북, AWS 이전 가이드
+│   └── adr/                  # 의사결정 기록 (Architecture Decision Records)
+├── reports/                  # (gitignore) 생성된 보고서
+└── logs/                     # (gitignore) 런타임 로그
 ```
 
 런타임에 생성되며 커밋하지 않는 경로:
@@ -109,7 +112,7 @@ sys-aims/
 
 ## 5. 실행 방법
 
-> 🚧 작성 예정: docker-compose 구성 후 채웁니다.
+> 🚧 로컬 실행만 작성되어 있습니다. 나머지 절차는 구현하면서 채웁니다.
 
 ### 5.1 사전 준비
 ```bash
@@ -119,9 +122,17 @@ cp .env.example .env
 
 ### 5.2 로컬 실행 (HTTP)
 ```bash
-# TODO
-# docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --wait
+docker compose -f docker-compose.yml -f docker-compose.local.yml ps
 ```
+
+| 서비스 | 주소 |
+|---|---|
+| Zabbix Web | http://127.0.0.1:8080 (`ZABBIX_WEB_PORT`) |
+| pitwall_web | http://127.0.0.1:8081 (`PITWALL_WEB_PORT`) |
+
+> `pitwall_web`은 의도적으로 `restart: "no"`입니다. 복구 주체는 Zabbix Action이어야 하기 때문입니다.
+> Docker 소켓 접근 방식은 [ADR-0001](docs/adr/0001-docker-socket-access.md)을 참고하세요.
 
 ### 5.3 프로덕션 배포 (HTTPS)
 ```bash
@@ -146,7 +157,8 @@ cp .env.example .env
 
 ## 7. 로드맵
 - [x] 프로젝트 골격 및 문서
-- [ ] Docker Compose (base / local / prod)
+- [x] Docker Compose base + local
+- [ ] Docker Compose prod (HTTPS / certbot)
 - [ ] Nginx 설정 (local HTTP / prod HTTPS)
 - [ ] Zabbix 템플릿 및 Action 구성
 - [ ] Self-Healing

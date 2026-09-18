@@ -141,7 +141,12 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml ps
 ```
 
 ### 5.4 Zabbix 설정 가져오기
-> TODO: `zabbix/templates/`의 템플릿과 Action import 절차
+```bash
+# 스택 기동 후, 웹에서 Admin 비밀번호 변경 → .env의 ZABBIX_API_* 설정
+python3 scripts/zabbix_config.py import
+```
+템플릿, 호스트, 트리거가 `zabbix/templates/*.yaml`에서 재현됩니다. 설계 근거, 측정 결과, 재현성 검증은 [docs/zabbix-monitoring.md](docs/zabbix-monitoring.md)를 참고하세요.
+설치 직후 뜨는 "Zabbix agent is not available" 알람의 원인은 [docs/troubleshooting.md](docs/troubleshooting.md)에 정리되어 있습니다.
 
 ### 5.5 일일 보고서 cron 등록
 > TODO: `automation/cron/` 적용 절차
@@ -160,7 +165,8 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml ps
 - [x] Docker Compose base + local
 - [ ] Docker Compose prod (HTTPS / certbot)
 - [ ] Nginx 설정 (local HTTP / prod HTTPS)
-- [ ] Zabbix 템플릿 및 Action 구성
+- [x] Zabbix 호스트, 템플릿, 트리거 (API + YAML export)
+- [ ] Zabbix Action 구성
 - [ ] Self-Healing
 - [ ] AI RCA → Slack
 - [ ] AI 일일점검 보고서

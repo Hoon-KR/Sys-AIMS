@@ -1,0 +1,97 @@
+# 트러블슈팅 기록
+
+증상 → 원인 → 해결 순으로 기록합니다. EC2 이전 시에도 똑같이 겪을 수 있는 내용을 우선합니다.
+
+---
+
+## 1. "Linux: Zabbix agent is not available" 알람이 계속 뜬다
+
+- **발생**: 2026-09-18, 로컬 스택 최초 기동 직후. 새로 설치하면 **EC2에서도 똑같이 발생합니다.**
+- **처음 생각한 원인**: `zabbix-agent` 컨테이너를 호스트로 등록하지 않아서
+- **실제 원인**: Zabbix를 설치하면 자동으로 생기는 기본 호스트 **`Zabbix server`** 때문
+
+```
+Zabbix server | agent 인터페이스 127.0.0.1:10050 | 템플릿: Linux by Zabbix agent
+```
+
+- 이 기본 호스트는 **자기 자신(127.0.0.1)에 agent가 있다고 가정합니다.** 패키지로 설치하면 이 가정이 맞습니다.
+- Docker에서는 server와 agent가 **서로 다른 컨테이너**에 있습니다. server 컨테이너 안의 `127.0.0.1:10050`에는 아무것도 없습니다.
+- 그래서 `zabbix-agent` 호스트를 등록해도 **이 알람은 사라지지 않습니다.**
+
+**확인 방법 (API)**
+```
+host.get → "Zabbix server" 의 interfaces: 127.0.0.1:10050, available=2 (연결 불가)
+```
+
+**해결** (`scripts/zabbix_config.py`의 `fix_default_server_host`, `apply`/`import` 시 자동 수행)
+1. `Zabbix server` 호스트에서 `Linux by Zabbix agent` 템플릿을 **unlink and clear** 합니다. 템플릿이 만든 아이템과 트리거도 함께 삭제됩니다.
+2. 쓰이지 않는 agent 인터페이스(127.0.0.1:10050)를 삭제합니다.
+3. `Zabbix server health` 템플릿은 **유지**합니다. internal 아이템이라 agent가 필요 없고, Server 자체 상태를 감시합니다.
+4. OS 지표는 별도 호스트 `zabbix-agent`가 담당합니다. 인터페이스는 IP가 아닌 DNS 이름 `zabbix-agent:10050`으로 연결합니다.
+
+**대안으로 검토했지만 채택하지 않은 방법**: 기본 호스트의 인터페이스를 `zabbix-agent`로 바꾸기
+- `zabbix-agent` 호스트와 **같은 OS 지표를 중복으로 수집**하게 됩니다.
+- 또 호스트 이름(`Zabbix server`)과 agent의 `ZBX_HOSTNAME`(`zabbix-agent`)이 달라서, active check가 실패합니다(`host [zabbix-agent] not found`).
+
+**함께 사라진 로그**: zabbix-server 로그에 반복되던 `cannot send list of active checks ... host [zabbix-agent] not found`
+→ `zabbix-agent` 호스트를 등록하자 사라졌습니다.
+
+---
+
+## 2. HTTP 체크가 장애 시 0이 아니라 not supported가 된다
+
+- **증상**: `pitwall_web`을 중지했는데 트리거가 발동하지 않습니다. 아이템은 새 값 없이 오류(not supported) 상태에 머뭅니다.
+- **원인**: 전처리 순서
+  1. `Check for not supported value` → 연결 오류를 `0`으로 치환 ✅
+  2. `Regular expression`(상태 줄에서 코드 추출) → 입력이 `0`이니 **매칭 실패** → 아이템이 다시 오류 상태가 됨 ❌
+- **해결**: 2단계에도 `Custom on fail: Set value to 0`을 설정합니다. 해석할 수 없는 응답도 장애로 보는 것이 맞으므로 의미상으로도 문제가 없습니다.
+- **참고**: 컨테이너가 멈추면 Docker 내장 DNS에서 이름이 사라집니다. 그래서 오류는 "연결 거부"가 아니라 `Could not resolve host: pitwall_web`으로 나옵니다. 어느 쪽이든 1단계에서 `0`으로 바뀝니다.
+
+---
+
+## 3. 측정 중 데이터가 수십 분간 끊겼다 (로컬 한정)
+
+- **증상**: 감지 시간 측정 도중 아이템 값이 38분간 전혀 수집되지 않았고, 측정 스크립트는 타임아웃으로 끝났습니다.
+- **원인**: 맥북이 배터리 상태에서 **잠자기**에 들어갔습니다(`pmset -g log`: 17:46:49 Sleep → 18:25:18 Wake). Docker Desktop VM 전체가 멈춘 것이고, Zabbix 문제가 아닙니다.
+- **해결**: 측정할 때는 `caffeinate -i python3 scripts/measure_detection.py`로 실행하고, 덮개를 닫지 않습니다.
+- EC2에서는 해당 없습니다.
+
+---
+
+## 4. 🔴 [미해결] 컨테이너 재기동 후 HTTP 체크가 1~2회 더 실패한다
+
+- **상태**: 미해결. Self-Healing 단계에서 다시 조사합니다.
+- **증상**: `docker start pitwall_web` 이후 Zabbix HTTP agent가 1~2회(15~30초) 더 `0`을 기록합니다.
+  그 결과 복구 확인 시간이 설계 기대치(15초 이내)보다 길고 편차가 큽니다.
+  5회 측정값은 9.5 / 14.2 / 29.8 / 29.8 / 44.9초입니다([zabbix-monitoring.md](zabbix-monitoring.md#측정-결과-장애-감지-및-복구-확인-시간)).
+- **영향**: 장애 **감지**와 Self-Healing 동작에는 영향이 없습니다. 복구 이벤트가 늦게 닫힐 뿐입니다.
+  다만 "재기동 후 복구 확인까지 N초" 같은 지표를 발표할 때는 이 문제를 알고 있어야 합니다.
+
+**관찰된 사실**
+- 3회차 예시: 18:28:22에 `start` → 18:28:37 `0`, 18:28:52 `0`, 18:29:07 `200`
+- 같은 조건에서 `docker start` 직후 **zabbix-server 컨테이너 안에서 직접** 확인하면 **t+0초부터 모두 성공**했습니다.
+  - `nslookup pitwall_web 127.0.0.11`
+  - `wget http://pitwall_web/`
+  - Docker 내장 DNS 등록이나 nginx 기동이 늦은 것은 아닙니다.
+- 재현이 일정하지 않습니다. 중지 20초 후 수동으로 재기동했을 때는 다음 체크에서 바로 `200`이 나왔습니다.
+- zabbix-server 이미지의 libcurl 버전은 `8.21.0`입니다.
+- 컨테이너가 멈춘 동안의 오류는 `Could not resolve host: pitwall_web`입니다. 연결 거부가 아니라 DNS 조회 실패입니다.
+
+**가설 (미검증)**
+- Zabbix HTTP agent poller가 libcurl 핸들을 재사용하면서 **DNS 조회 결과(실패 포함)를 캐시**하는 것으로 의심합니다.
+  그렇다면 재기동으로 IP가 바뀌거나 이름이 다시 등록되어도, 캐시가 만료될 때까지 실패가 이어질 수 있습니다.
+
+**다음에 확인할 것**
+1. HTTP agent poller의 로그 레벨을 올려 재기동 직후 실패의 **실제 오류 메시지**를 확인합니다.
+   `zabbix_server -R log_level_increase="http agent poller"`
+   지금은 전처리가 오류를 `0`으로 바꿔서 원래 메시지가 남지 않습니다.
+2. `docker stop`/`start` 전후로 컨테이너 IP가 바뀌는지 기록해, IP 변경과 실패가 관련 있는지 확인합니다.
+3. 가설이 맞다면 대응책을 검토합니다. 예: compose에서 고정 IP를 할당하거나, 복구 조건을 확인하는 방식을 바꾸는 것.
+
+---
+
+## 참고: 컨테이너 agent에서 not supported인 아이템
+
+`Linux by Zabbix agent`를 컨테이너 agent에 적용하면 일부 아이템이 not supported가 됩니다(로컬에서 154개 중 10개).
+예: `system.sw.packages.get`(패키지 DB 없음). 컨테이너 환경에서 예상되는 동작입니다.
+EC2에서 호스트 디스크 같은 지표가 필요하면 호스트의 `/`를 읽기 전용으로 마운트하는 방안을 검토합니다.

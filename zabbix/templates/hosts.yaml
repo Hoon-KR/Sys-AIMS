@@ -1,0 +1,34 @@
+zabbix_export:
+  version: '7.0'
+  host_groups:
+    - uuid: 1f8c05f2e0bf4a699b24bf0da2b80cd9
+      name: Sys-AIMS
+  hosts:
+    - host: pitwall_web
+      name: pitwall_web
+      templates:
+        - name: 'Sys-AIMS HTTP Service'
+      groups:
+        - name: Sys-AIMS
+      tags:
+        - tag: container
+          value: pitwall_web
+      macros:
+        - macro: '{$SERVICE.URL}'
+          value: 'http://pitwall_web/'
+      inventory_mode: DISABLED
+    - host: zabbix-agent
+      name: zabbix-agent
+      templates:
+        - name: 'Linux by Zabbix agent'
+      groups:
+        - name: Sys-AIMS
+      interfaces:
+        - useip: 'NO'
+          ip: ''
+          dns: zabbix-agent
+          interface_ref: if1
+      tags:
+        - tag: role
+          value: host-os
+      inventory_mode: DISABLED

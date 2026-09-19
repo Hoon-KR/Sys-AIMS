@@ -32,6 +32,21 @@ zabbix_export:
         - macro: '{$SERVICE.URL}'
           value: 'http://pitwall_web/'
       inventory_mode: DISABLED
+    - host: rca
+      name: rca
+      templates:
+        - name: 'Sys-AIMS HTTP Service'
+      groups:
+        - name: Sys-AIMS
+      tags:
+        - tag: role
+          value: automation
+      macros:
+        - macro: '{$HEALING.MODE}'
+          value: 'off'
+        - macro: '{$SERVICE.URL}'
+          value: 'http://rca:8081/health'
+      inventory_mode: DISABLED
     - host: zabbix-agent
       name: zabbix-agent
       templates:

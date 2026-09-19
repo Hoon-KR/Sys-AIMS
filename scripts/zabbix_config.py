@@ -119,6 +119,16 @@ HOSTS = [
             {"macro": "{$HEALING.MODE}", "value": "off"},  # healer는 자동 복구 대상이 아니다
         ],
     },
+    {
+        "host": "rca",
+        "templates": [HTTP_TEMPLATE],
+        "interfaces": [],
+        "tags": [{"tag": "role", "value": "automation"}],
+        "macros": [
+            {"macro": "{$SERVICE.URL}", "value": "http://rca:8081/health"},
+            {"macro": "{$HEALING.MODE}", "value": "off"},  # rca 장애는 사람이 본다 (복구 경로와 분리)
+        ],
+    },
 ]
 
 # ---------------------------------------------------------------

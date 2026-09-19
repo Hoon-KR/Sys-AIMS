@@ -39,7 +39,7 @@ Sys-AIMS는 컨테이너 장애를 **감지하고, 스스로 복구하고, 원�
 1. Zabbix Server가 HTTP 체크로 `pitwall_web`의 상태 이상을 감지합니다(Docker 소켓 불필요).
 2. Zabbix Server의 Trigger가 발동하고 Action이 실행됩니다.
 3. **Self-Healing**: Action(태그 `healing=auto`)이 webhook으로 healer를 호출하고, healer가 socket-proxy를 거쳐 대상 컨테이너를 재기동합니다. 반복 장애는 서킷 브레이커가 차단하고, 5분 동안 미해소 시 Slack으로 사람을 호출합니다([docs/self-healing.md](docs/self-healing.md)).
-4. **RCA**: `alertscripts` 래퍼가 `automation/rca`를 호출합니다. 로그를 수집하고 OpenAI로 분석한 뒤 Slack으로 전송합니다.
+4. **RCA**: healer가 재기동 **전**에 로그와 상태 스냅샷을 수집해 rca 컨테이너로 넘깁니다. rca가 노이즈를 압축하고 OpenAI로 분석한 뒤 Slack으로 전송합니다. OpenAI 키는 rca에만 있고 Docker 권한은 healer에만 있습니다([docs/rca.md](docs/rca.md)).
 
 ### 설계 원칙
 - **환경 분리**: local(HTTP)과 prod(HTTPS)의 차이는 `.env`, Compose override, Nginx conf 디렉터리 세 곳에만 둡니다.
@@ -93,9 +93,9 @@ sys-aims/
 ├── automation/               # Python 자동화 스크립트
 │   ├── common/               # 설정 로더, Zabbix / OpenAI / Slack 클라이언트
 │   ├── healing/              # healer (Self-Healing 재기동 서비스)
-│   ├── rca/                  # 로그 분석 → Slack
+│   ├── rca/                  # rca 서비스 (로그 압축 → OpenAI → Slack)
 │   ├── daily_report/         # 일일점검 보고서 생성
-│   ├── prompts/              # LLM 프롬프트 템플릿
+│   ├── prompts/              # LLM 프롬프트 · 응답 스키마 (코드와 분리)
 │   ├── cron/                 # crontab 정의
 │   └── tests/
 ├── scripts/                  # 운영 스크립트 (인증서 발급, DuckDNS 갱신, 배포)
@@ -168,6 +168,6 @@ python3 scripts/zabbix_config.py import
 - [ ] Nginx 설정 (local HTTP / prod HTTPS)
 - [x] Zabbix 호스트, 템플릿, 트리거 (API + YAML export)
 - [x] Self-Healing (socket-proxy + healer + Zabbix Action, 서킷 브레이커, 에스컬레이션)
-- [ ] AI RCA → Slack
+- [x] AI RCA → Slack (토큰 상한, 일일 한도, 근거 원문 대조)
 - [ ] AI 일일점검 보고서
 - [ ] AWS EC2 이전 + Let's Encrypt

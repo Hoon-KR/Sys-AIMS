@@ -1,0 +1,32 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "category", "confidence", "evidence"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "한국어 2~3문장 원인 요약. 첫 문장에 결론."
+    },
+    "category": {
+      "type": "string",
+      "enum": ["external_stop", "oom", "crash", "config_error", "dependency", "resource", "unknown"]
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["high", "medium", "low"]
+    },
+    "evidence": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["line", "reason"],
+        "properties": {
+          "line": {"type": "string", "description": "제공된 로그에서 그대로 복사한 줄"},
+          "reason": {"type": "string", "description": "이 줄이 근거인 이유 (한국어 한 문장)"}
+        }
+      }
+    }
+  }
+}

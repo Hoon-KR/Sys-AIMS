@@ -208,7 +208,8 @@ services:
   # -----------------------------------------------------------
   # socket-proxy — 원본 Docker 소켓을 가진 유일한 컨테이너 (ADR-0001)
   # 허용 목록(정규식)에 없는 요청은 모두 거부한다:
-  #   GET  /containers/<TARGET_CONTAINER>/json      (재기동 후 상태 확인)
+  #   GET  /containers/<TARGET_CONTAINER>/json      (재기동 전 상태 스냅샷, 재기동 후 확인)
+  #   GET  /containers/<TARGET_CONTAINER>/logs      (재기동 전 로그 스냅샷 → RCA)
   #   POST /containers/<TARGET_CONTAINER>/restart   (재기동)
   # 정규식은 프록시가 ^...$ 로 감싸 전체 경로 일치로 검사한다 (부분 일치 불가).
   # 접속은 healer 컨테이너에서만 허용 (-allowfrom), 외부 포트 없음.
@@ -221,7 +222,7 @@ services:
       - "-loglevel=INFO"
       - "-listenip=0.0.0.0"
       - "-allowfrom=healer"
-      - "-allowGET=/v1\\.[0-9]+/containers/${TARGET_CONTAINER:?TARGET_CONTAINER is required}/json"
+      - "-allowGET=/v1\\.[0-9]+/containers/${TARGET_CONTAINER:?TARGET_CONTAINER is required}/(json|logs)"
       - "-allowPOST=/v1\\.[0-9]+/containers/${TARGET_CONTAINER:?TARGET_CONTAINER is required}/restart"
       - "-allowhealthcheck"
       - "-watchdoginterval=30"
@@ -259,7 +260,7 @@ services:
   healer:
     build:
       context: ./automation
-    image: sys-aims/healer:local
+    image: sys-aims/automation:local
     container_name: healer
     restart: unless-stopped
     depends_on:
@@ -272,6 +273,8 @@ services:
       HEALER_WINDOW_SECONDS: ${HEALER_WINDOW_SECONDS:?HEALER_WINDOW_SECONDS is required}
       HEALER_COOLDOWN_SECONDS: ${HEALER_COOLDOWN_SECONDS:?HEALER_COOLDOWN_SECONDS is required}
       SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      # rca 호출용. HEALER_TOKEN과 다른 값 — healer가 뚫려도 같은 토큰으로 rca에 접근할 수 없게
+      RCA_TOKEN: ${RCA_TOKEN:?RCA_TOKEN is required}
       DOCKER_PROXY_HOST: socket-proxy
       STATE_FILE: /data/state.json
       # 재기동/서킷 이력 (JSON Lines, 5MB × 5 로테이션). RCA도 같은 디렉터리에 rca.jsonl 로 남긴다.
@@ -287,11 +290,54 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     networks:
-      - zbx_heal     # zabbix-server → healer
+      - zbx_heal     # zabbix-server → healer, healer → rca
       - docker_api   # healer → socket-proxy
       - egress       # Slack 알림
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+    logging: *default-logging
+
+  # -----------------------------------------------------------
+  # rca — 장애 직전 로그를 OpenAI로 분석해 Slack 전송 (automation/rca, docs/rca.md)
+  # 권한 분리: OpenAI 키는 여기에만 있고, Docker 접근은 없다 (docker_api 망에 없음).
+  # healer가 재기동 전에 뜬 로그 스냅샷을 받아서 분석만 한다.
+  # -----------------------------------------------------------
+  rca:
+    build:
+      context: ./automation
+    image: sys-aims/automation:local
+    container_name: rca
+    restart: unless-stopped
+    command: ["python", "-m", "rca.server"]
+    environment:
+      RCA_TOKEN: ${RCA_TOKEN:?RCA_TOKEN is required}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY is required}
+      OPENAI_MODEL: ${OPENAI_MODEL:?OPENAI_MODEL is required}
+      RCA_MAX_PER_DAY: ${RCA_MAX_PER_DAY:?RCA_MAX_PER_DAY is required}
+      RCA_MAX_LOG_CHARS: ${RCA_MAX_LOG_CHARS:?RCA_MAX_LOG_CHARS is required}
+      RCA_MAX_OUTPUT_TOKENS: ${RCA_MAX_OUTPUT_TOKENS:?RCA_MAX_OUTPUT_TOKENS is required}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      RCA_STATE_FILE: /data/rca_state.json
+      EVENT_LOG_DIR: /data/events
+      TZ: ${TZ:?TZ is required}
+    volumes:
+      - automation_data:/data   # rca.jsonl 은 healer.jsonl 과 같은 디렉터리 (event_id로 연결)
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks:
+      - zbx_heal   # healer → rca, zabbix-server → rca(/health 감시)
+      - egress     # OpenAI, Slack
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/health', timeout=3)"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -308,13 +354,13 @@ networks:
     internal: true
   # 모니터링 망: server ↔ agent ↔ 대상 서비스
   zbx_mon:
-  # Self-Healing 호출 망: zabbix-server ↔ healer
+  # Self-Healing 호출 망: zabbix-server ↔ healer ↔ rca
   zbx_heal:
     internal: true
   # Docker API 망: healer ↔ socket-proxy (소켓 프록시는 이 망에만 존재)
   docker_api:
     internal: true
-  # 외부 통신 망: healer의 Slack 알림
+  # 외부 통신 망: healer/rca 의 Slack 알림, rca 의 OpenAI 호출
   egress:
 
 volumes:

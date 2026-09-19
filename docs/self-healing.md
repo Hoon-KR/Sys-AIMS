@@ -83,7 +83,7 @@ healer의 모든 요청, 결과, 서킷 변화는 볼륨 `automation_data`의 **
 | 항목 | 내용 |
 |---|---|
 | 형식 | 한 줄 = 한 이벤트 (JSON). 공통 필드는 `v`(스키마 버전), `ts`, `epoch`, `source`, `event` |
-| 파일 | 쓰는 주체별로 나눕니다: `healer.jsonl`, (예정) `rca.jsonl`. 여러 프로세스가 한 파일을 로테이트하면 경합이 생기기 때문입니다. |
+| 파일 | 쓰는 주체별로 나눕니다: `healer.jsonl`, `rca.jsonl`([rca.md](rca.md)). 여러 프로세스가 한 파일을 로테이트하면 경합이 생기기 때문입니다. |
 | 연결 키 | `event_id`(Zabbix 이벤트 ID). 같은 장애에 대한 healer 기록과 RCA 기록을 이 키로 묶습니다. |
 | 크기 제한 | 크기 기반 로테이션 5MB × 5개(`EVENT_LOG_MAX_BYTES`, `EVENT_LOG_BACKUPS`). 쓰는 주체당 최대 약 30MB입니다. |
 | 실패 시 | 파일 기록이 실패해도 복구 작업은 계속됩니다. stdout(`docker logs`)에는 항상 같은 줄이 남습니다. |
@@ -102,6 +102,7 @@ healer의 모든 요청, 결과, 서킷 변화는 볼륨 `automation_data`의 **
 | `auth.failed` | 토큰 인증 실패 |
 | `circuit.opened` / `circuit.reset` | 서킷 열림 / 수동 해제 |
 | `healer.started` | healer 기동 |
+| `rca.snapshot` / `rca.handoff` / `rca.handoff_failed` | 재기동 전 스냅샷 / rca 전달 결과 ([rca.md](rca.md)) |
 
 ```bash
 # 원본 보기

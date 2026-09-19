@@ -13,12 +13,20 @@ healer 코드에서도 같은 제한을 한 번 더 건다 (심층 방어).
 모든 요청/결과/서킷 변화는 <EVENT_LOG_DIR>/healer.jsonl 에도 남는다 (common.eventlog).
 컨테이너를 재생성해도 이력이 유지된다.
 
+RCA 연동 (docs/rca.md)
+  재기동 "전"에 컨테이너 상태와 직전 실행 구간 로그를 스냅샷으로 뜨고,
+  재기동과 Zabbix 응답이 끝난 "뒤" 백그라운드로 rca 서비스에 넘긴다.
+  - 복구가 우선: 스냅샷/전달이 실패해도 재기동은 그대로 진행한다.
+  - 서킷 열림, 쿨다운, 허용되지 않은 컨테이너는 RCA도 하지 않는다.
+  - OpenAI 키는 healer에 없다 (rca 서비스에만 있다).
+
 응답 코드
   200 재기동 + healthy 확인 완료   403 허용되지 않은 컨테이너   401 인증 실패
   409 쿨다운 중(중복 요청)          429 서킷 열림(자동 복구 중단)
   502 재기동 실패 또는 제한 시간 내 healthy 미도달
 """
 
+import datetime
 import hmac
 import http.client
 import json
@@ -43,6 +51,11 @@ PROXY_PORT = int(os.environ.get("DOCKER_PROXY_PORT", "2375"))
 DOCKER_API = "/v1.44"
 STATE_FILE = pathlib.Path(os.environ.get("STATE_FILE", "/data/state.json"))
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
+RCA_HOST = os.environ.get("RCA_HOST", "rca")
+RCA_PORT = int(os.environ.get("RCA_PORT", "8081"))
+RCA_TOKEN = os.environ.get("RCA_TOKEN", "")
+SNAPSHOT_TIMEOUT = 3        # 스냅샷이 재기동을 늦추지 않도록 짧게
+SNAPSHOT_TAIL = 2000        # 직전 실행 구간에서 가져올 최대 줄 수 (전송량 상한 ≈ 150KB)
 
 _lock = threading.Lock()
 EVENTS = EventLog("healer")
@@ -68,14 +81,25 @@ def save_state(state):
 
 
 # ---------------------------------------------------------------- docker (via proxy)
-def docker(method, path):
-    conn = http.client.HTTPConnection(PROXY_HOST, PROXY_PORT, timeout=VERIFY_TIMEOUT + 10)
+def docker(method, path, timeout=None, raw=False):
+    conn = http.client.HTTPConnection(PROXY_HOST, PROXY_PORT, timeout=timeout or VERIFY_TIMEOUT + 10)
     try:
         conn.request(method, DOCKER_API + path)
         response = conn.getresponse()
-        return response.status, response.read().decode(errors="replace")
+        body = response.read()
+        return response.status, body if raw else body.decode(errors="replace")
     finally:
         conn.close()
+
+
+def demux_logs(raw):
+    """TTY가 아닌 컨테이너의 로그 스트림은 8바이트 헤더(stream, size)로 다중화되어 있다."""
+    out, i = bytearray(), 0
+    while i + 8 <= len(raw):
+        size = int.from_bytes(raw[i + 4:i + 8], "big")
+        out += raw[i + 8:i + 8 + size]
+        i += 8 + size
+    return out.decode(errors="replace").splitlines()
 
 
 def container_state(name):
@@ -99,6 +123,49 @@ def restart_and_verify(name):
             return True, f"running/{last['health'] or 'no-healthcheck'}"
         time.sleep(1)
     return False, f"not healthy within {VERIFY_TIMEOUT}s (last={last})"
+
+
+# ---------------------------------------------------------------- RCA snapshot / handoff
+def _epoch(docker_ts):
+    """'2026-09-18T10:43:52.649744417Z' → epoch 초 (소수점 이하 버림)."""
+    return int(datetime.datetime.fromisoformat(docker_ts[:19]).replace(tzinfo=datetime.timezone.utc).timestamp())
+
+
+def snapshot(name):
+    """재기동 직전 상태 + 직전 실행 구간 로그. 어떤 실패도 예외로 올리지 않는다."""
+    started = time.time()
+    try:
+        status, body = docker("GET", f"/containers/{name}/json", timeout=SNAPSHOT_TIMEOUT)
+        if status != 200:
+            return {"error": f"inspect HTTP {status}"}, [], round(time.time() - started, 2)
+        s = json.loads(body)["State"]
+        state = {"status": s["Status"], "exit_code": s["ExitCode"], "oom_killed": s["OOMKilled"],
+                 "error_message": s.get("Error") or None, "started_at": s["StartedAt"], "finished_at": s["FinishedAt"]}
+        since = _epoch(s["StartedAt"])
+        status, raw = docker("GET", f"/containers/{name}/logs?stdout=1&stderr=1&since={since}&tail={SNAPSHOT_TAIL}",
+                             timeout=SNAPSHOT_TIMEOUT, raw=True)
+        logs = demux_logs(raw) if status == 200 else []
+        if status != 200:
+            state["logs_error"] = f"logs HTTP {status}"
+        return state, logs, round(time.time() - started, 2)
+    except Exception as e:  # 복구가 우선: 스냅샷 실패는 기록만 한다
+        return {"error": f"{type(e).__name__}: {e}"[:200]}, [], round(time.time() - started, 2)
+
+
+def handoff_to_rca(job):
+    """재기동이 끝난 뒤 백그라운드 스레드에서 실행된다. 실패해도 healer 동작에 영향 없음."""
+    ctx = {"event_id": job.get("event_id"), "container": job.get("container")}
+    if not RCA_TOKEN:
+        return log("rca.handoff_skipped", reason="RCA_TOKEN not set", **ctx)
+    try:
+        conn = http.client.HTTPConnection(RCA_HOST, RCA_PORT, timeout=3)
+        conn.request("POST", "/analyze", json.dumps(job, ensure_ascii=False).encode(),
+                     {"Content-Type": "application/json", "Authorization": f"Bearer {RCA_TOKEN}"})
+        status = conn.getresponse().status
+        conn.close()
+        log("rca.handoff", status=status, log_lines=len(job.get("logs") or []), **ctx)
+    except Exception as e:
+        log("rca.handoff_failed", error=f"{type(e).__name__}: {e}"[:200], **ctx)
 
 
 # ---------------------------------------------------------------- heal
@@ -133,11 +200,21 @@ def heal(request):
             log("circuit.opened", restarts_in_window=len(recent), window_seconds=WINDOW_SECONDS, slack_notified=notified, **ctx)
             return 429, {"result": "blocked", "reason": f"{len(recent)} restarts within {WINDOW_SECONDS}s — circuit opened"}
 
+        # 재기동 "전" 스냅샷: 재기동 후에는 새 프로세스의 기동 로그가 섞인다
+        container_state, logs, snapshot_s = snapshot(container)
+        log("rca.snapshot", snapshot_s=snapshot_s, log_lines=len(logs), state_error=container_state.get("error"), **ctx)
+
         started = time.time()
         ok, detail = restart_and_verify(container)
         elapsed = round(time.time() - started, 1)
         state["attempts"] = recent + [{"container": container, "at": started, "ok": ok, "event_id": ctx["event_id"]}]
         save_state(state)
+
+    heal_result = {"result": "restarted" if ok else "failed", "detail": detail, "elapsed_s": elapsed}
+    # 재기동 성공/실패와 무관하게 RCA 수행. Zabbix 응답을 늦추지 않도록 백그라운드로 넘긴다.
+    threading.Thread(target=handoff_to_rca, daemon=True, args=({
+        **ctx, "trigger": request.get("trigger"), "container_state": container_state, "logs": logs, "heal": heal_result,
+    },)).start()
 
     if ok:
         log("heal.succeeded", elapsed_s=elapsed, detail=detail, attempt=len(state["attempts"]), **ctx)

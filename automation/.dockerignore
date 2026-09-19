@@ -1,9 +1,7 @@
 **/__pycache__
 **/*.pyc
 tests/
-prompts/
 cron/
 daily_report/
-rca/
 Dockerfile
 .dockerignore

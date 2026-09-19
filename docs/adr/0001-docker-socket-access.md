@@ -1,6 +1,6 @@
 # ADR-0001: Docker 소켓 접근 방식: socket-proxy 경유 (C안)
 
-- **상태**: 채택 (2026-09-18), 2단계 구현 및 검증 완료 (2026-09-18)
+- **상태**: 채택 (2026-09-18), 2단계 구현·검증 (2026-09-18), RCA용 로그 조회 추가·재검증 (2026-09-19)
 - **관련 기능**: ① Self-Healing(컨테이너 재기동), ② AI RCA(`docker logs` 수집)
 
 ## 배경
@@ -28,7 +28,7 @@ volumes:
 |---|---|---|
 | A | zabbix-agent2에 원본 소켓 + Zabbix 원격 명령(`system.run`)으로 재기동 | 🔴 Server **또는** Agent 중 하나만 뚫려도 호스트 root |
 | B | agent2에 원본 소켓(모니터링 전용) + 재기동은 별도 컨테이너 | 🟠 Agent가 뚫리면 호스트 root |
-| **C** | **원본 소켓을 받는 컨테이너 없음.** socket-proxy로 허용한 API만 노출 | 🟢 **지정한 컨테이너 1개의 재기동과 상태 조회**로 한정 (아래 검증 결과) |
+| **C** | **원본 소켓을 받는 컨테이너 없음.** socket-proxy로 허용한 API만 노출 | 🟢 **지정한 컨테이너 1개의 재기동·상태 조회·로그 조회**로 한정 (아래 검증 결과) |
 
 ## 결정: C안
 
@@ -62,7 +62,7 @@ C안의 효과는 **프록시가 권한을 얼마나 잘게 제한할 수 있느
 **적용한 설정** (`docker-compose.yml`)
 ```
 -allowfrom=healer
--allowGET=/v1\.[0-9]+/containers/${TARGET_CONTAINER}/json       # 재기동 후 상태 확인
+-allowGET=/v1\.[0-9]+/containers/${TARGET_CONTAINER}/(json|logs)   # 상태 스냅샷·확인, RCA용 로그 (2026-09-19 logs 추가)
 -allowPOST=/v1\.[0-9]+/containers/${TARGET_CONTAINER}/restart   # 재기동
 ```
 - 프록시는 정규식을 `^...$`로 감싸서 **경로 전체가 일치해야만** 통과시킵니다(기동 로그로 확인).
@@ -127,6 +127,30 @@ C안에서 agent2의 Docker 플러그인을 쓰지 않는 이유입니다.
 TCP로 동작하는 socket-proxy에는 agent2가 연결할 수 없습니다.
 agent2의 Docker 플러그인을 쓰려면 원본 소켓을 줄 수밖에 없고, 그렇게 하면 B안이 됩니다. 그래서 사용하지 않습니다.
 
+## 검증 기록 4: 로그 조회 추가 후 재검증 (RCA 단계)
+
+- **일시**: 2026-09-19
+- **변경**: `-allowGET`에 `logs`를 추가했습니다(`(json|logs)`). 방법은 검증 기록 1과 같이 healer 안에서 직접 호출했습니다.
+
+| # | 요청 (모두 GET) | 기대 | 실제 | 결과 |
+|---|---|---|---|---|
+| 21 | `/containers/pitwall_web/logs?stdout=1&stderr=1&tail=5` | 허용 | **200** | ✅ |
+| 22 | `/containers/pitwall_web/logs?stdout=1&since=…&tail=2000` | 허용 | **200** (107KB) | ✅ |
+| 23 | `/containers/pitwall_web/json` | 허용 | **200** | ✅ |
+| 24 | `/containers/postgres/logs` | 거부 | **403** | ✅ |
+| 25 | `/containers/zabbix-server/logs` | 거부 | **403** | ✅ |
+| 26 | `/containers/rca/logs` (OpenAI 키를 가진 컨테이너) | 거부 | **403** | ✅ |
+| 27 | `/containers/healer/logs` | 거부 | **403** | ✅ |
+| 28 | `/containers/postgres/json` | 거부 | **403** | ✅ |
+| 29 | `/containers/pitwall_web/../postgres/logs` | 거부 | **403** | ✅ |
+| 30 | `/containers/pitwall_web%2F..%2Fpostgres/logs` | 거부 | **403** | ✅ |
+| 31 | **`/containers/postgres/logs?x=/containers/pitwall_web/logs`** (쿼리 문자열에 허용 경로 삽입) | 거부 | **403** | ✅ 프록시는 쿼리를 뺀 경로만 검사 |
+| 32 | `/containers/pitwall_web/logsX` | 거부 | **403** | ✅ 전체 일치 검사 |
+| 33 | `/containers/pitwall_web/logs/../../postgres/logs` | 거부 | **403** | ✅ |
+| 34 | `/containers/pitwall_web/top` | 거부 | **403** | ✅ |
+
+예상과 다른 결과는 없었습니다. 로그 조회 권한도 **대상 컨테이너 1개**로 한정됩니다. 특히 OpenAI 키를 가진 rca 컨테이너의 로그는 healer도 읽을 수 없습니다.
+
 ---
 
 ## 트레이드오프
@@ -136,7 +160,7 @@ agent2의 Docker 플러그인을 쓰려면 원본 소켓을 줄 수밖에 없고
 - **늘어나는 것**: 컨테이너 1개(socket-proxy, 메모리 상한 32M).
 - **남는 위험**
   - socket-proxy 자체는 원본 소켓을 가지고 있습니다. 완화책: 외부 포트 없음, `docker_api` 내부 망에만 연결, 파일시스템 `read_only`, `cap_drop: ALL`, `no-new-privileges`, 비root 실행.
-  - healer가 침해되면 공격자가 할 수 있는 일은 **`pitwall_web` 재기동**뿐입니다. healer의 서킷 브레이커가 반복 재기동도 제한합니다.
+  - healer가 침해되면 공격자가 할 수 있는 일은 **`pitwall_web` 재기동과 그 로그 읽기**뿐입니다. healer의 서킷 브레이커가 반복 재기동도 제한합니다. OpenAI 키는 healer에 없습니다(rca 컨테이너로 분리, [rca.md](../rca.md)).
 - **환경별 차이**: 프록시는 비root로 실행되므로 소켓 소유 그룹을 `group_add`로 추가해야 합니다.
   맥은 `root:root`, EC2는 `root:docker`입니다([aws-migration.md](../aws-migration.md)).
 
@@ -144,4 +168,4 @@ agent2의 Docker 플러그인을 쓰려면 원본 소켓을 줄 수밖에 없고
 
 - [x] 1단계: 어떤 컨테이너에도 소켓을 마운트하지 않은 상태로 기본 스택 구성
 - [x] 2단계: `docker-socket-proxy`(wollomatic) + healer 컨테이너 + Zabbix Action(webhook) 연동 ([self-healing.md](../self-healing.md))
-- [ ] RCA 단계: 허용 목록에 `GET /containers/${TARGET_CONTAINER}/logs` 추가 후 재검증
+- [x] RCA 단계: 허용 목록에 `GET /containers/${TARGET_CONTAINER}/logs` 추가 후 재검증 (검증 기록 4, [rca.md](../rca.md))

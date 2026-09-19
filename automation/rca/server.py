@@ -94,35 +94,77 @@ def verify_evidence(evidence, sent_text):
     return [{**e, "verified": bool(e.get("line", "").strip()) and e["line"].strip() in sent_text} for e in evidence]
 
 
-def slack_header(job):
+# Slack Block Kit — 발표 스크린샷에 쓰이므로 줄바꿈/들여쓰기를 mrkdwn 자동 처리에 맡기지 않고
+# 헤더 / 필드 / 섹션 / 푸터 블록으로 나눈다. (Slack section text 최대 3000자)
+CONFIDENCE_KO = {"high": "높음", "medium": "보통", "low": "낮음"}
+SECTION_LIMIT = 2900
+FENCE = "`" * 3
+
+
+def _section(text):
+    return {"type": "section", "text": {"type": "mrkdwn", "text": text[:SECTION_LIMIT]}}
+
+
+def _code(text):
+    return FENCE + text.replace(FENCE, "'" * 3) + FENCE
+
+
+def _header(text):
+    return {"type": "header", "text": {"type": "plain_text", "text": text[:150], "emoji": True}}
+
+
+def _status_fields(job):
     heal = job.get("heal") or {}
-    icon = "✅" if heal.get("result") == "restarted" else "❌"
     state = job.get("container_state") or {}
-    exit_info = f"exit {state.get('exit_code')}, OOM {'예' if state.get('oom_killed') else '아니오'}" if "exit_code" in state else "상태 스냅샷 없음"
-    return (f":mag: *[Sys-AIMS] AI 장애 분석 — `{job['container']}`* (event {job.get('event_id')})\n"
-            f"복구: {icon} {heal.get('result', '?')} ({heal.get('elapsed_s', '?')}초)   종료: {exit_info}")
+    recovery = "✅ 재기동 성공" if heal.get("result") == "restarted" else "❌ 재기동 후 정상화 실패"
+    if "exit_code" in state:
+        before = f"{state.get('status')} · exit {state.get('exit_code')} · OOM {'예' if state.get('oom_killed') else '아니오'}"
+    else:
+        before = "스냅샷 없음"
+    return [{"type": "mrkdwn", "text": f"*자동 복구*\n{recovery} ({heal.get('elapsed_s', '?')}초)"},
+            {"type": "mrkdwn", "text": f"*재기동 직전 상태*\n{before}"}]
+
+
+def _footer(job, text):
+    return {"type": "context", "elements": [{"type": "mrkdwn", "text": f"Sys-AIMS · event {job.get('event_id')} · {text}"}]}
 
 
 def slack_success(job, result, evidence, meta):
     usage = meta.get("usage", {})
-    lines = [slack_header(job), "", f"*요약*: {result['summary']}"]
-    if evidence:
-        lines.append("*근거 로그*:")
-        for e in evidence:
-            mark = "" if e["verified"] else "  ⚠️ _원문에서 확인 안 됨_"
-            lines.append(f"> `{e['line'].strip()[:300]}`{mark}\n>   ↳ {e['reason']}")
-    else:
-        lines.append("*근거 로그*: 없음 (로그에서 근거를 찾지 못함)")
-    lines.append(f"_분류: {CATEGORY_KO.get(result['category'], result['category'])} · 신뢰도: {result['confidence']} · "
-                 f"{meta.get('model')} · 토큰 입력 {usage.get('input_tokens', '?')}/출력 {usage.get('output_tokens', '?')} · "
-                 f"{meta.get('latency_s')}초_")
-    return "\n".join(lines)
+    fields = _status_fields(job) + [
+        {"type": "mrkdwn", "text": f"*원인 분류*\n{CATEGORY_KO.get(result['category'], result['category'])}"},
+        {"type": "mrkdwn", "text": f"*신뢰도*\n{CONFIDENCE_KO.get(result['confidence'], result['confidence'])}"},
+    ]
+    blocks = [
+        _header(f"🔍 AI 장애 분석 — {job['container']}"),
+        {"type": "section", "fields": fields},
+        {"type": "divider"},
+        _section(f"*요약*\n{result['summary']}"),
+        _section("*근거 로그*" if evidence else "*근거 로그*\n로그에서 근거를 찾지 못했습니다."),
+    ]
+    for n, e in enumerate(evidence, 1):
+        mark = "" if e["verified"] else "\n⚠️ _원문 로그에서 확인되지 않은 인용입니다_"
+        blocks.append(_section(f"*{n}.*\n{_code(e['line'].strip()[:500])}\n↳ {e['reason']}{mark}"))
+    blocks += [
+        {"type": "divider"},
+        _footer(job, f"{meta.get('model')} · 토큰 입력 {usage.get('input_tokens', 0):,} / 출력 {usage.get('output_tokens', 0):,} "
+                     f"· {meta.get('latency_s')}초"),
+    ]
+    return f"🔍 AI 장애 분석 — {job['container']}: {result['summary']}", blocks
 
 
 def slack_fallback(job, reason, sent_text):
-    tail = [l for l in sent_text.splitlines() if l.strip()][-FALLBACK_LINES:]
-    body = "\n".join(f"> `{l[:300]}`" for l in tail) or "> (로그 없음)"
-    return f"{slack_header(job)}\n\n:warning: *AI 분석 불가*: {reason}\n*장애 직전 로그 (최근 {len(tail)}줄)*:\n{body}"
+    tail = [l[:300] for l in sent_text.splitlines() if l.strip()][-FALLBACK_LINES:]
+    blocks = [
+        _header(f"⚠️ AI 분석 불가 — {job['container']}"),
+        {"type": "section", "fields": _status_fields(job)},
+        {"type": "divider"},
+        _section(f"*사유*\n{reason}"),
+        _section(f"*장애 직전 로그 (최근 {len(tail)}줄)*\n" + (_code("\n".join(tail)) if tail else "로그 없음")),
+        {"type": "divider"},
+        _footer(job, "AI 분석 없이 로그를 직접 확인하세요"),
+    ]
+    return f"⚠️ AI 분석 불가 — {job['container']}: {reason}", blocks
 
 
 # ---------------------------------------------------------------- worker
@@ -134,7 +176,7 @@ def process(job):
 
     allowed, used = take_daily_quota()
     if not allowed:
-        notified = slack.post(SLACK_WEBHOOK_URL, slack_fallback(job, f"일일 한도({MAX_PER_DAY}회) 초과로 생략", sent_text))
+        notified = slack.post(SLACK_WEBHOOK_URL, *slack_fallback(job, f"일일 한도({MAX_PER_DAY}회) 초과로 생략", sent_text))
         EVENTS.write("rca.skipped", reason="daily_cap", used_today=used, slack_notified=notified, **ctx)
         return
 
@@ -151,15 +193,16 @@ def process(job):
                                    timeout=OPENAI_TIMEOUT)
     except llm.LLMError as e:
         reason = f"OpenAI {e.kind} — {e}"
-        notified = slack.post(SLACK_WEBHOOK_URL, slack_fallback(job, reason, sent_text))
+        notified = slack.post(SLACK_WEBHOOK_URL, *slack_fallback(job, reason, sent_text))
         EVENTS.write("rca.failed", error_kind=e.kind, error=str(e), attempts=getattr(e, "attempts", None),
                      latency_s=getattr(e, "latency_s", None), usage=getattr(e, "usage", None),
                      model=OPENAI_MODEL, used_today=used, slack_notified=notified, **ctx)
         return
 
     evidence = verify_evidence(result.get("evidence", []), sent_text)
-    message = redact(slack_success(job, result, evidence, meta))
-    notified = slack.post(SLACK_WEBHOOK_URL, message)
+    text, blocks = slack_success(job, result, evidence, meta)
+    # 마스킹은 블록 전체(JSON)에 적용한다
+    notified = slack.post(SLACK_WEBHOOK_URL, redact(text), json.loads(redact(json.dumps(blocks, ensure_ascii=False))))
     EVENTS.write("rca.completed", category=result["category"], confidence=result["confidence"], summary=result["summary"],
                  evidence=evidence, evidence_verified=sum(e["verified"] for e in evidence),
                  model=meta["model"], usage=meta["usage"], latency_s=meta["latency_s"], attempts=meta["attempts"],

@@ -19,6 +19,21 @@ zabbix_export:
         - macro: '{$SERVICE.URL}'
           value: 'http://healer:8080/health'
       inventory_mode: DISABLED
+    - host: pitwall_api
+      name: pitwall_api
+      templates:
+        - name: 'Sys-AIMS HTTP Service'
+      groups:
+        - name: Sys-AIMS
+      tags:
+        - tag: role
+          value: dependency
+      macros:
+        - macro: '{$HEALING.MODE}'
+          value: 'off'
+        - macro: '{$SERVICE.URL}'
+          value: 'http://pitwall_api/status.json'
+      inventory_mode: DISABLED
     - host: pitwall_web
       name: pitwall_web
       templates:
@@ -30,7 +45,7 @@ zabbix_export:
           value: pitwall_web
       macros:
         - macro: '{$SERVICE.URL}'
-          value: 'http://pitwall_web/'
+          value: 'http://pitwall_web/healthz'
       inventory_mode: DISABLED
     - host: rca
       name: rca

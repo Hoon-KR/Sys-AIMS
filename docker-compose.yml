@@ -187,14 +187,20 @@ services:
     #     2) "Zabbix Action이 복구했다"는 사실을 검증/증명할 수 없다.
     #   따라서 장애 시 컨테이너는 죽은 채로 남고, 오직 Zabbix Action만 재기동한다.
     restart: "no"
+    depends_on:
+      pitwall_api:
+        condition: service_healthy
     environment:
       TZ: ${TZ:?TZ is required}
     volumes:
       - ./services/pitwall_web/html:/usr/share/nginx/html:ro
+      # 서버 설정 (딥 헬스체크 /healthz → pitwall_api). 장애 시나리오 ②는 이 디렉터리에 잘못된 설정을 주입한다.
+      - ./services/pitwall_web/conf.d:/etc/nginx/conf.d:ro
     networks:
       - zbx_mon
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      # 딥 헬스체크: 의존 서비스(pitwall_api)까지 응답해야 healthy
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/healthz"]
       interval: 10s
       timeout: 3s
       retries: 3
@@ -203,6 +209,32 @@ services:
       resources:
         limits:
           memory: 64M
+    logging: *default-logging
+
+  # -----------------------------------------------------------
+  # pitwall_api — pitwall_web 의 의존 서비스 (장애 시나리오 ①의 대상, docs/chaos-scenarios.md)
+  # 자동 복구 대상이 아니다 (TARGET_CONTAINER 아님, socket-proxy 허용 목록 밖).
+  # -----------------------------------------------------------
+  pitwall_api:
+    image: nginx:1.30.5-alpine3.24
+    container_name: pitwall_api
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:?TZ is required}
+    volumes:
+      - ./services/pitwall_api/html:/usr/share/nginx/html:ro
+    networks:
+      - zbx_mon
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/status.json"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: 32M
     logging: *default-logging
 
   # -----------------------------------------------------------

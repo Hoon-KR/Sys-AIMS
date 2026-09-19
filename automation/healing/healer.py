@@ -131,6 +131,26 @@ def _epoch(docker_ts):
     return int(datetime.datetime.fromisoformat(docker_ts[:19]).replace(tzinfo=datetime.timezone.utc).timestamp())
 
 
+def _ts_key(docker_ts):
+    """RFC3339Nano 를 나노초까지 비교 가능한 문자열로 (소수부 길이가 제각각이라 9자리로 맞춘다)."""
+    base, _, frac = docker_ts.rstrip("Z").partition(".")
+    return f"{base}.{frac.ljust(9, '0')[:9]}"
+
+
+def logs_since_start(raw_lines, started_at):
+    """timestamps=1 로 받은 줄에서 started_at 이후 줄만 남기고 타임스탬프를 뗀다.
+
+    Docker API 의 since 는 초 단위라서, 재기동이 같은 초 안에 일어나면(docker restart 에서 흔함)
+    이전 실행의 종료 로그(SIGQUIT 등)가 섞인다. 실제로 이 때문에 RCA가 원인을 '외부 종료'로 잘못 분류했다.
+    """
+    start, kept = _ts_key(started_at), []
+    for line in raw_lines:
+        stamp, _, text = line.partition(" ")
+        if _ts_key(stamp) >= start:
+            kept.append(text)
+    return kept
+
+
 def snapshot(name):
     """재기동 직전 상태 + 직전 실행 구간 로그. 어떤 실패도 예외로 올리지 않는다."""
     started = time.time()
@@ -142,9 +162,9 @@ def snapshot(name):
         state = {"status": s["Status"], "exit_code": s["ExitCode"], "oom_killed": s["OOMKilled"],
                  "error_message": s.get("Error") or None, "started_at": s["StartedAt"], "finished_at": s["FinishedAt"]}
         since = _epoch(s["StartedAt"])
-        status, raw = docker("GET", f"/containers/{name}/logs?stdout=1&stderr=1&since={since}&tail={SNAPSHOT_TAIL}",
+        status, raw = docker("GET", f"/containers/{name}/logs?stdout=1&stderr=1&timestamps=1&since={since}&tail={SNAPSHOT_TAIL}",
                              timeout=SNAPSHOT_TIMEOUT, raw=True)
-        logs = demux_logs(raw) if status == 200 else []
+        logs = logs_since_start(demux_logs(raw), s["StartedAt"]) if status == 200 else []
         if status != 200:
             state["logs_error"] = f"logs HTTP {status}"
         return state, logs, round(time.time() - started, 2)

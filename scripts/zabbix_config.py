@@ -107,7 +107,19 @@ HOSTS = [
         "interfaces": [],  # HTTP agent는 인터페이스가 필요 없다
         # 이벤트에 전파되어 healer가 재기동할 컨테이너를 식별하는 데 쓴다
         "tags": [{"tag": "container", "value": "pitwall_web"}],
-        "macros": [{"macro": "{$SERVICE.URL}", "value": "http://pitwall_web/"}],
+        # 딥 헬스체크: 의존 서비스(pitwall_api)까지 응답해야 200 (docs/chaos-scenarios.md)
+        "macros": [{"macro": "{$SERVICE.URL}", "value": "http://pitwall_web/healthz"}],
+    },
+    {
+        "host": "pitwall_api",
+        "templates": [HTTP_TEMPLATE],
+        "interfaces": [],
+        "tags": [{"tag": "role", "value": "dependency"}],
+        "macros": [
+            {"macro": "{$SERVICE.URL}", "value": "http://pitwall_api/status.json"},
+            # 자동 복구 대상 아님 — 의존 서비스 장애는 사람이 판단한다 (healer 허용 목록 밖)
+            {"macro": "{$HEALING.MODE}", "value": "off"},
+        ],
     },
     {
         "host": "healer",

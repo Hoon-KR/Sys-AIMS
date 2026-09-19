@@ -19,13 +19,15 @@ python3 scripts/zabbix_config.py import   # 새 환경(EC2)에 재현
 | 템플릿 `Sys-AIMS HTTP Service` | HTTP 상태 코드 아이템 1개 + 트리거 1개 + 매크로 |
 | 호스트 `zabbix-agent` | `Linux by Zabbix agent` 템플릿, 인터페이스는 DNS 이름 `zabbix-agent:10050` |
 | 호스트 `pitwall_web` | `Sys-AIMS HTTP Service` 템플릿, 인터페이스 없음, 태그 `container=pitwall_web` |
+| 호스트 `pitwall_api` | pitwall_web의 의존 서비스. `/status.json` 감시, `{$HEALING.MODE}=off` |
 | 호스트 `healer` | `Sys-AIMS HTTP Service` 템플릿 (`/health` 감시), `{$HEALING.MODE}=off` |
+| 호스트 `rca` | `/health` 감시, `{$HEALING.MODE}=off` |
 | Self-Healing Action, 미디어 타입, 전용 사용자 | [self-healing.md](self-healing.md) |
 | 기본 호스트 `Zabbix server` | Linux 템플릿 unlink+clear, agent 인터페이스 제거 ([troubleshooting #1](troubleshooting.md)) |
 
 ### HTTP 체크 아이템 `http.status.code`
 - **방식**: HTTP agent 아이템. 헤더만 받아 상태 줄에서 코드를 추출합니다. Docker 소켓은 필요 없습니다([ADR-0001](adr/0001-docker-socket-access.md)).
-- **URL**: `{$SERVICE.URL}`. 호스트에서 `http://pitwall_web/`로 재정의하며, 컨테이너 DNS 이름을 사용합니다.
+- **URL**: `{$SERVICE.URL}`. 호스트에서 재정의하며, 컨테이너 DNS 이름을 사용합니다. pitwall_web은 **딥 헬스체크** `http://pitwall_web/healthz`(의존 서비스 pitwall_api까지 확인)입니다([chaos-scenarios.md](chaos-scenarios.md)).
 - **값**: HTTP 상태 코드. 연결 실패나 타임아웃이면 `0`입니다.
   - 전처리 1단계 `Check for not supported value`: 오류를 `0`으로 바꿉니다.
   - 전처리 2단계 `Regex`: 상태 코드를 추출하고, 실패하면 `0`을 유지합니다.

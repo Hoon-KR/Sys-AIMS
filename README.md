@@ -89,7 +89,8 @@ sys-aims/
 ├── postgres/
 │   └── init/                 # DB 초기화 SQL
 ├── services/
-│   └── pitwall_web/          # 모니터링 대상 샘플 서비스
+│   ├── pitwall_web/          # 모니터링 대상 샘플 서비스 (딥 헬스체크 /healthz)
+│   └── pitwall_api/          # pitwall_web 의 의존 서비스 (장애 시나리오 ①)
 ├── automation/               # Python 자동화 스크립트
 │   ├── common/               # 설정 로더, Zabbix / OpenAI / Slack 클라이언트
 │   ├── healing/              # healer (Self-Healing 재기동 서비스)
@@ -98,7 +99,7 @@ sys-aims/
 │   ├── prompts/              # LLM 프롬프트 · 응답 스키마 (코드와 분리)
 │   ├── cron/                 # crontab 정의
 │   └── tests/
-├── scripts/                  # 운영 스크립트 (인증서 발급, DuckDNS 갱신, 배포)
+├── scripts/                  # 운영 스크립트 (Zabbix 설정, 측정, 장애 시나리오 chaos.py)
 ├── docs/                     # 아키텍처, 런북, AWS 이전 가이드
 │   └── adr/                  # 의사결정 기록 (Architecture Decision Records)
 ├── reports/                  # (gitignore) 생성된 보고서
@@ -169,5 +170,6 @@ python3 scripts/zabbix_config.py import
 - [x] Zabbix 호스트, 템플릿, 트리거 (API + YAML export)
 - [x] Self-Healing (socket-proxy + healer + Zabbix Action, 서킷 브레이커, 에스컬레이션)
 - [x] AI RCA → Slack (토큰 상한, 일일 한도, 근거 원문 대조)
+- [x] 발표용 장애 시나리오 (의존 서비스 장애, 설정 오류 — docs/chaos-scenarios.md)
 - [ ] AI 일일점검 보고서
 - [ ] AWS EC2 이전 + Let's Encrypt

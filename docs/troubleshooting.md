@@ -144,6 +144,16 @@ host.get → "Zabbix server" 의 interfaces: 127.0.0.1:10050, available=2 (연�
 
 ---
 
+## 9. 새 Zabbix에 import 할 때 hosts.yaml 에서 타임아웃
+
+- **발생**: 2026-09-19, 보고서의 데이터 부족 검증을 위해 새로 설치한 Zabbix에 import하던 중
+- **증상**: `configuration.import`(hosts.yaml)이 클라이언트 타임아웃(15초)으로 실패했습니다. 다시 실행하니 1.9초 만에 끝났습니다. 서버에서는 첫 요청이 계속 처리되어 완료되어 있었습니다.
+- **원인**: 새로 기동한 Zabbix에서 `Linux by Zabbix agent` 템플릿을 연결하면 아이템 약 150개를 생성합니다. 호스트가 늘어나면서(pitwall_api, rca) 15초를 넘기게 되었습니다.
+- **영향**: **EC2에서 최초 import할 때 그대로 재현될 수 있습니다.**
+- **해결**: `ZabbixAPI.call()`에 호출별 타임아웃을 추가하고, `configuration.import`에만 120초를 줍니다. 나머지 API 호출은 15초를 유지합니다.
+
+---
+
 ## 참고: 컨테이너 agent에서 not supported인 아이템
 
 `Linux by Zabbix agent`를 컨테이너 agent에 적용하면 일부 아이템이 not supported가 됩니다(로컬에서 154개 중 10개).

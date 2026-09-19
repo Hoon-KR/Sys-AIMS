@@ -44,13 +44,13 @@ class ZabbixAPI:
             raise ZabbixAPIError(f"missing env: {', '.join(missing)}")
         return cls(env["ZABBIX_API_URL"], env["ZABBIX_API_USER"], env["ZABBIX_API_PASSWORD"])
 
-    def call(self, method, params=None):
+    def call(self, method, params=None, timeout=None):
         headers = {"Content-Type": "application/json-rpc"}
         if self._auth:
             headers["Authorization"] = f"Bearer {self._auth}"
         body = json.dumps({"jsonrpc": "2.0", "method": method, "params": params or {}, "id": 1}).encode()
         request = urllib.request.Request(self.url, body, headers)
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+        with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
             result = json.load(response)
         if "error" in result:
             error = result["error"]

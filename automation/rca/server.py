@@ -29,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from common import slack
 from common.eventlog import EventLog
-from rca import llm
+from common import llm, quota
 from rca.compress import compress, redact
 
 TOKEN = os.environ["RCA_TOKEN"]
@@ -52,25 +52,6 @@ EVENTS = EventLog("rca")
 JOBS = queue.Queue(maxsize=3)
 CATEGORY_KO = {"external_stop": "외부 종료", "oom": "메모리 부족(OOM)", "crash": "애플리케이션 오류",
                "config_error": "설정 오류", "dependency": "의존 서비스 장애", "resource": "자원 고갈", "unknown": "판단 불가"}
-
-
-# ---------------------------------------------------------------- daily cap
-def take_daily_quota():
-    """오늘 호출 가능하면 카운트를 올리고 (True, 사용량) 을, 아니면 (False, 사용량) 을 돌려준다."""
-    today = time.strftime("%Y-%m-%d")
-    try:
-        state = json.loads(STATE_FILE.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        state = {}
-    if state.get("date") != today:
-        state = {"date": today, "count": 0}
-    if state["count"] >= MAX_PER_DAY:
-        return False, state["count"]
-    state["count"] += 1
-    tmp = STATE_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state))
-    tmp.replace(STATE_FILE)
-    return True, state["count"]
 
 
 # ---------------------------------------------------------------- formatting
@@ -174,7 +155,7 @@ def process(job):
     sent_text, stats = compress(logs, MAX_LOG_CHARS)
     EVENTS.write("rca.started", log_stats=stats, **ctx)
 
-    allowed, used = take_daily_quota()
+    allowed, used = quota.take(STATE_FILE, MAX_PER_DAY)
     if not allowed:
         notified = slack.post(SLACK_WEBHOOK_URL, *slack_fallback(job, f"일일 한도({MAX_PER_DAY}회) 초과로 생략", sent_text))
         EVENTS.write("rca.skipped", reason="daily_cap", used_today=used, slack_notified=notified, **ctx)

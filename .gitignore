@@ -68,3 +68,6 @@ Thumbs.db
 
 # ---------- 장애 시나리오 주입 파일 (scripts/chaos.py 가 만들고 지움) ----------
 services/pitwall_web/conf.d/zz-chaos-*.conf
+
+# ---------- Nginx Basic Auth (reports) ----------
+nginx/auth/

@@ -57,5 +57,38 @@
         ]
       }
     ]
+  },
+  "report_access": {
+    "role": {
+      "name": "Sys-AIMS Report (read-only)",
+      "type": "1",
+      "api_mode": "1",
+      "api": [
+        "event.get",
+        "history.get",
+        "host.get",
+        "item.get",
+        "problem.get",
+        "trend.get",
+        "user.logout"
+      ]
+    },
+    "usergroup": {
+      "name": "Sys-AIMS Read-only",
+      "gui_access": "3",
+      "hostgroup_rights": [
+        {
+          "hostgroup": "Sys-AIMS",
+          "permission": "2"
+        }
+      ]
+    },
+    "user": {
+      "username_env": "ZABBIX_REPORT_USER",
+      "role": "Sys-AIMS Report (read-only)",
+      "usergroups": [
+        "Sys-AIMS Read-only"
+      ]
+    }
   }
 }

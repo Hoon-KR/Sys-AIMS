@@ -205,6 +205,22 @@ MEDIA_TYPES = [
 ]
 
 # 이름 기반 선언 — apply 와 import(automation.json) 가 같은 함수로 적용한다
+# ---------------------------------------------------------------
+# 일일 보고서 전용 읽기 전용 계정 (docs/daily-report.md)
+#   Super admin(ZABBIX_API_*)은 프로비저닝 스크립트만 쓴다. reporter 는 이 계정만 가진다.
+#   - 역할: UI 접근 없음, API 는 아래 조회 메서드만 허용 (allow list)
+#   - 권한: Sys-AIMS 호스트 그룹 읽기
+#   - 비밀번호: .env ZABBIX_REPORT_PASSWORD (export 파일에는 남지 않는다)
+# ---------------------------------------------------------------
+REPORT_ROLE = "Sys-AIMS Report (read-only)"
+REPORT_USERGROUP = "Sys-AIMS Read-only"
+REPORT_API_METHODS = ["event.get", "history.get", "host.get", "item.get", "problem.get", "trend.get", "user.logout"]  # logout: 세션 누적 방지
+REPORT_ACCESS = {
+    "role": {"name": REPORT_ROLE, "type": "1", "api_mode": "1", "api": REPORT_API_METHODS},
+    "usergroup": {"name": REPORT_USERGROUP, "gui_access": "3", "hostgroup_rights": [{"hostgroup": HOST_GROUP, "permission": "2"}]},
+    "user": {"username_env": "ZABBIX_REPORT_USER", "role": REPORT_ROLE, "usergroups": [REPORT_USERGROUP]},
+}
+
 AUTOMATION = {
     "usergroup": {"name": BOT_USERGROUP, "gui_access": "3", "hostgroup_rights": [{"hostgroup": HOST_GROUP, "permission": "2"}]},
     "user": {"username": BOT_USER, "role": "User role", "usergroups": [BOT_USERGROUP],
@@ -391,6 +407,57 @@ def ensure_automation(api, spec):
         api.call("action.create", {"name": a["name"], "eventsource": a["eventsource"], **a_params})
 
 
+def ensure_report_access(api, spec):
+    env = load_env()
+    username, password = env.get(spec["user"]["username_env"], ""), env.get("ZABBIX_REPORT_PASSWORD", "")
+    if not username or not password:
+        log("WARN: ZABBIX_REPORT_USER / ZABBIX_REPORT_PASSWORD empty — report account not configured")
+        return
+    r = spec["role"]
+    # UI 는 전부 거부(ui.default_access=0), API 는 허용 목록만(api.mode=1)
+    rules = {"ui.default_access": 0, "actions.default_access": 0, "modules.default_access": 0,
+             "api.access": 1, "api.mode": int(r["api_mode"]), "api": r["api"]}
+    found = api.call("role.get", {"filter": {"name": r["name"]}, "output": ["roleid"]})
+    if found:
+        roleid = found[0]["roleid"]
+        api.call("role.update", {"roleid": roleid, "rules": rules})
+    else:
+        log(f"create role '{r['name']}'")
+        roleid = api.call("role.create", {"name": r["name"], "type": int(r["type"]), "rules": rules})["roleids"][0]
+
+    ug = spec["usergroup"]
+    ug_params = {"gui_access": ug["gui_access"],
+                 "hostgroup_rights": [{"id": _id(api, "hostgroup", "name", x["hostgroup"], "groupid"), "permission": x["permission"]}
+                                      for x in ug["hostgroup_rights"]]}
+    found = api.call("usergroup.get", {"filter": {"name": ug["name"]}, "output": ["usrgrpid"]})
+    if found:
+        api.call("usergroup.update", {"usrgrpid": found[0]["usrgrpid"], **ug_params})
+    else:
+        log(f"create usergroup '{ug['name']}'")
+        api.call("usergroup.create", {"name": ug["name"], **ug_params})
+
+    u_params = {"roleid": roleid, "passwd": password,
+                "usrgrps": [{"usrgrpid": _id(api, "usergroup", "name", g, "usrgrpid")} for g in spec["user"]["usergroups"]]}
+    found = api.call("user.get", {"filter": {"username": username}, "output": ["userid"]})
+    if found:
+        api.call("user.update", {"userid": found[0]["userid"], **u_params})
+    else:
+        log(f"create user '{username}' (read-only)")
+        api.call("user.create", {"username": username, **u_params})
+
+
+def export_report_access(api):
+    r = api.call("role.get", {"filter": {"name": REPORT_ROLE}, "output": ["name", "type"], "selectRules": ["api.mode", "api"]})[0]
+    ug = api.call("usergroup.get", {"filter": {"name": REPORT_USERGROUP}, "output": ["name", "gui_access"], "selectHostGroupRights": "extend"})[0]
+    groups = {g["groupid"]: g["name"] for g in api.call("hostgroup.get", {"groupids": [x["id"] for x in ug["hostgroup_rights"]], "output": ["groupid", "name"]})}
+    return {
+        "role": {"name": r["name"], "type": r["type"], "api_mode": str(r["rules"]["api.mode"]), "api": sorted(r["rules"]["api"])},
+        "usergroup": {"name": ug["name"], "gui_access": ug["gui_access"],
+                      "hostgroup_rights": [{"hostgroup": groups[x["id"]], "permission": x["permission"]} for x in ug["hostgroup_rights"]]},
+        "user": {"username_env": "ZABBIX_REPORT_USER", "role": r["name"], "usergroups": [ug["name"]]},
+    }
+
+
 def export_automation(api):
     """live 상태를 이름 기반으로 정규화해 AUTOMATION 과 같은 형태로 만든다."""
     names = lambda method, key, field, ids: {x[key]: x[field] for x in api.call(f"{method}.get", {f"{key}s": ids, "output": [key, field]})} if ids else {}
@@ -429,6 +496,7 @@ def cmd_apply(api):
     ensure_global_secret_macros(api)
     ensure_media_types(api)
     ensure_automation(api, AUTOMATION)
+    ensure_report_access(api, REPORT_ACCESS)
 
 
 def cmd_export(api):
@@ -439,7 +507,8 @@ def cmd_export(api):
     HOSTS_FILE.write_text(api.call("configuration.export", {"format": "yaml", "options": {"hosts": [h["hostid"] for h in hosts]}}))
     media = api.call("mediatype.get", {"filter": {"name": [m["name"] for m in MEDIA_TYPES]}, "output": ["mediatypeid"]})
     MEDIATYPES_FILE.write_text(api.call("configuration.export", {"format": "yaml", "options": {"mediaTypes": [m["mediatypeid"] for m in media]}}))
-    AUTOMATION_FILE.write_text(json.dumps(export_automation(api), ensure_ascii=False, indent=2) + "\n")
+    AUTOMATION_FILE.write_text(json.dumps({**export_automation(api), "report_access": export_report_access(api)},
+                                          ensure_ascii=False, indent=2) + "\n")
     for path in (TEMPLATE_FILE, HOSTS_FILE, MEDIATYPES_FILE, AUTOMATION_FILE):
         log(f"wrote {path.relative_to(REPO_ROOT)}")
 
@@ -461,11 +530,14 @@ def cmd_import(api):
     # 템플릿이 먼저 있어야 호스트의 템플릿 연결이 성공한다
     for path in (TEMPLATE_FILE, HOSTS_FILE, MEDIATYPES_FILE):
         log(f"import {path.relative_to(REPO_ROOT)}")
-        api.call("configuration.import", {"format": "yaml", "rules": IMPORT_RULES, "source": path.read_text()})
+        # 새로 설치한 Zabbix에서 템플릿 연결(아이템 약 150개 생성)은 15초를 넘길 수 있다 (troubleshooting #9)
+        api.call("configuration.import", {"format": "yaml", "rules": IMPORT_RULES, "source": path.read_text()}, timeout=120)
     fix_default_server_host(api)
     ensure_global_secret_macros(api)
     log(f"import {AUTOMATION_FILE.relative_to(REPO_ROOT)}")
-    ensure_automation(api, json.loads(AUTOMATION_FILE.read_text()))
+    automation = json.loads(AUTOMATION_FILE.read_text())
+    ensure_automation(api, automation)
+    ensure_report_access(api, automation.get("report_access", REPORT_ACCESS))
 
 
 def main():

@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["overall_summary", "comparison_notes", "incident_commentary", "cautions", "data_quality_note"],
+  "properties": {
+    "overall_summary": {"type": "string", "description": "한국어 2~3문장. 코드가 정한 verdict 의 사유를 풀어 설명."},
+    "comparison_notes": {"type": "array", "maxItems": 4, "items": {"type": "string"}},
+    "incident_commentary": {"type": "string", "description": "장애·자동 복구·AI 분석 패턴 1~2문장"},
+    "cautions": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "evidence", "action"],
+        "properties": {
+          "title": {"type": "string"},
+          "evidence": {"type": "string", "description": "입력 JSON의 수치를 그대로 인용"},
+          "action": {"type": "string", "description": "사람이 할 구체적 조치"}
+        }
+      }
+    },
+    "data_quality_note": {"type": "string"}
+  }
+}

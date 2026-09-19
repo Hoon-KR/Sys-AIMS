@@ -292,6 +292,7 @@ services:
   healer:
     build:
       context: ./automation
+      target: base   # 외부 패키지 없는 이미지 (reporter 전용 의존성 제외)
     image: sys-aims/automation:local
     container_name: healer
     restart: unless-stopped
@@ -345,6 +346,7 @@ services:
   rca:
     build:
       context: ./automation
+      target: base   # 외부 패키지 없는 이미지 (reporter 전용 의존성 제외)
     image: sys-aims/automation:local
     container_name: rca
     restart: unless-stopped
@@ -380,6 +382,58 @@ services:
           memory: 64M
     logging: *default-logging
 
+  # -----------------------------------------------------------
+  # reporter — AI 일일 점검 보고서 (automation/daily_report, docs/daily-report.md)
+  # 매일 REPORT_TIME 에 생성 (컨테이너 내부 스케줄러, 놓친 실행 따라잡기).
+  # Zabbix 는 읽기 전용 계정만 가진다 (Super admin 없음). 장애 이력은 읽기 전용으로 마운트.
+  # -----------------------------------------------------------
+  reporter:
+    build:
+      context: ./automation
+      target: reporter   # base + markdown (해시 고정, automation/requirements/reporter.txt)
+    image: sys-aims/reporter:local
+    container_name: reporter
+    restart: unless-stopped
+    depends_on:
+      zabbix-web:
+        condition: service_healthy
+    environment:
+      REPORT_ZABBIX_URL: http://zabbix-web:8080/api_jsonrpc.php
+      ZABBIX_REPORT_USER: ${ZABBIX_REPORT_USER:?ZABBIX_REPORT_USER is required}
+      ZABBIX_REPORT_PASSWORD: ${ZABBIX_REPORT_PASSWORD:?ZABBIX_REPORT_PASSWORD is required}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY is required}
+      OPENAI_MODEL: ${OPENAI_MODEL:?OPENAI_MODEL is required}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      REPORT_TIME: ${REPORT_TIME:?REPORT_TIME is required}
+      REPORT_MAX_PER_DAY: ${REPORT_MAX_PER_DAY:?REPORT_MAX_PER_DAY is required}
+      REPORT_MAX_OUTPUT_TOKENS: ${REPORT_MAX_OUTPUT_TOKENS:?REPORT_MAX_OUTPUT_TOKENS is required}
+      REPORT_RETENTION_DAYS: ${REPORT_RETENTION_DAYS:?REPORT_RETENTION_DAYS is required}
+      # 외부 열람 주소 (prod: https://<도메인>/reports). 비어 있으면 Slack 에 파일명만 표시
+      REPORT_BASE_URL: ${REPORT_BASE_URL:-}
+      REPORTS_DIR: /reports
+      EVENTS_DIR: /data/events
+      TZ: ${TZ:?TZ is required}
+    volumes:
+      - automation_data:/data:ro   # healer.jsonl / rca.jsonl 읽기 전용 (장애 기록 변조 방지)
+      - reports_data:/reports      # 보고서 (prod 에서 nginx 가 읽기 전용으로 서빙)
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks:
+      - zbx_mon   # zabbix-web API
+      - egress    # OpenAI, Slack
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "daily_report.scheduler"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    logging: *default-logging
+
 networks:
   # DB 전용 망: 외부 통신 불가. postgres는 이 망에만 존재한다.
   zbx_db:
@@ -392,8 +446,9 @@ networks:
   # Docker API 망: healer ↔ socket-proxy (소켓 프록시는 이 망에만 존재)
   docker_api:
     internal: true
-  # 외부 통신 망: healer/rca 의 Slack 알림, rca 의 OpenAI 호출
+  # 외부 통신 망: healer/rca/reporter 의 Slack 알림, rca/reporter 의 OpenAI 호출
   egress:
 
 volumes:
   automation_data:
+  reports_data:

@@ -1,0 +1,8 @@
+# reporter 이미지 전용 외부 의존성 (healer / rca 이미지에는 설치되지 않는다)
+# 버전과 배포 파일 해시(sha256)를 모두 고정한다. 설치: pip install --require-hashes --no-deps -r reporter.txt
+#   --require-hashes : 해시가 다른 파일(변조·다른 빌드)은 설치 거부
+#   --no-deps        : 의존성을 자동으로 끌어오지 않음 (Markdown 3.10.3 은 런타임 의존성 없음)
+# 갱신 절차: docs/daily-report.md "외부 의존성" 참고
+markdown==3.10.3 \
+    --hash=sha256:fa6c92a00a4a3c98b22728c64a935ae1928250ae65058a6ded814d2cc29a4cea \
+    --hash=sha256:3589362618f743188b4d955b874402bc814f4f83f544dc207719f4baa7d9c45f

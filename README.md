@@ -13,7 +13,7 @@ Sys-AIMS는 컨테이너 장애를 **감지하고, 스스로 복구하고, 원�
 |---|------|------|
 | 1 | **Self-Healing** | Zabbix Trigger → Action이 장애 컨테이너를 자동으로 재기동 |
 | 2 | **AI RCA** | 장애가 나면 `docker logs`를 OpenAI API로 분석해 근본 원인을 Slack으로 전송 |
-| 3 | **AI 일일점검 보고서** | 매일 08:00 cron이 Zabbix API로 24시간 지표를 수집하고 AI가 마크다운 보고서 생성 |
+| 3 | **AI 일일점검 보고서** | 매일 08:00 reporter가 Zabbix API(읽기 전용)와 자동화 기록으로 24시간 지표를 집계하고, AI가 해석을 더한 마크다운/HTML 보고서 생성 |
 
 ---
 
@@ -32,7 +32,7 @@ Sys-AIMS는 컨테이너 장애를 **감지하고, 스스로 복구하고, 원�
                                                               │
                                              OpenAI API ◀─────┤─────▶ Slack
                                                               │
-                                   cron 08:00 ──▶ daily_report ──▶ reports/*.md
+                          reporter 08:00 ──▶ daily_report ──▶ /reports/*.md·html (Nginx, Basic Auth)
 ```
 
 ### 장애 대응 흐름
@@ -53,13 +53,13 @@ Sys-AIMS는 컨테이너 장애를 **감지하고, 스스로 복구하고, 원�
 
 | 영역 | 기술 |
 |------|------|
-| 인프라 | AWS EC2 t4g.medium (ARM64), Amazon Linux 2023 |
+| 인프라 | AWS EC2 t4g.large (ARM64, 8GB), gp3 30GB, Amazon Linux 2023, 서울 리전 |
 | 컨테이너 | Docker, Docker Compose |
 | 모니터링 | Zabbix Server / Web / Agent |
 | DB | PostgreSQL |
 | 프록시 / TLS | Nginx, Let's Encrypt (certbot) |
 | DNS | DuckDNS (`sys-aims.duckdns.org`) |
-| 자동화 | Python 3, cron |
+| 자동화 | Python 3 (표준 라이브러리 중심, reporter만 `markdown`), 컨테이너 내부 스케줄러 |
 | AI | OpenAI API |
 | 알림 | Slack Incoming Webhook |
 | 개발 환경 | macOS (Apple Silicon M1, ARM64) |
@@ -95,9 +95,9 @@ sys-aims/
 │   ├── common/               # 설정 로더, Zabbix / OpenAI / Slack 클라이언트
 │   ├── healing/              # healer (Self-Healing 재기동 서비스)
 │   ├── rca/                  # rca 서비스 (로그 압축 → OpenAI → Slack)
-│   ├── daily_report/         # 일일점검 보고서 생성
+│   ├── daily_report/         # reporter (수집 → AI 해석 → md/html → Slack, 스케줄러)
+│   ├── requirements/         # 외부 의존성 (reporter 전용, 해시 고정)
 │   ├── prompts/              # LLM 프롬프트 · 응답 스키마 (코드와 분리)
-│   ├── cron/                 # crontab 정의
 │   └── tests/
 ├── scripts/                  # 운영 스크립트 (Zabbix 설정, 측정, 장애 시나리오 chaos.py)
 ├── docs/                     # 아키텍처, 런북, AWS 이전 가이드
@@ -150,8 +150,13 @@ python3 scripts/zabbix_config.py import
 템플릿, 호스트, 트리거가 `zabbix/templates/*.yaml`에서 재현됩니다. 설계 근거, 측정 결과, 재현성 검증은 [docs/zabbix-monitoring.md](docs/zabbix-monitoring.md)를 참고하세요.
 설치 직후 뜨는 "Zabbix agent is not available" 알람의 원인은 [docs/troubleshooting.md](docs/troubleshooting.md)에 정리되어 있습니다.
 
-### 5.5 일일 보고서 cron 등록
-> TODO: `automation/cron/` 적용 절차
+### 5.5 일일 보고서
+reporter 컨테이너가 매일 `REPORT_TIME`(기본 08:00)에 자동 생성합니다. 호스트 cron 등록은 필요 없습니다.
+```bash
+docker exec reporter python -m daily_report.run --hours 6   # 즉시 생성 (시연용)
+sh scripts/fetch_reports.sh && open reports/index.html      # 로컬에서 보기
+```
+자세한 내용은 [docs/daily-report.md](docs/daily-report.md), AI 신뢰 원칙은 [docs/ai-trust.md](docs/ai-trust.md)를 참고하세요.
 
 ---
 
@@ -171,5 +176,5 @@ python3 scripts/zabbix_config.py import
 - [x] Self-Healing (socket-proxy + healer + Zabbix Action, 서킷 브레이커, 에스컬레이션)
 - [x] AI RCA → Slack (토큰 상한, 일일 한도, 근거 원문 대조)
 - [x] 발표용 장애 시나리오 (의존 서비스 장애, 설정 오류 — docs/chaos-scenarios.md)
-- [ ] AI 일일점검 보고서
-- [ ] AWS EC2 이전 + Let's Encrypt
+- [x] AI 일일점검 보고서 (컨테이너 스케줄러, 읽기 전용 Zabbix 계정, HTML + Basic Auth — docs/daily-report.md)
+- [ ] AWS EC2 이전 + Let's Encrypt (작업 목록: docs/aws-migration.md)

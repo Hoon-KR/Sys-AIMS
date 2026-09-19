@@ -1,4 +1,4 @@
-"""OpenAI Responses API 호출 (표준 라이브러리만 사용).
+"""OpenAI Responses API 호출 (표준 라이브러리만 사용). rca / daily_report 공용.
 
 - 타임아웃/429/5xx 는 1회 재시도, 4xx(키/모델/요청 오류)는 재시도하지 않는다.
 - 응답은 JSON 스키마(strict)로 받는다.

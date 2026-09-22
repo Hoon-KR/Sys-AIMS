@@ -90,5 +90,11 @@
         "Sys-AIMS Read-only"
       ]
     }
+  },
+  "housekeeping": {
+    "hk_history_global": "1",
+    "hk_history": "7d",
+    "hk_trends_global": "1",
+    "hk_trends": "90d"
   }
 }

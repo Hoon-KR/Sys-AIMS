@@ -221,6 +221,15 @@ REPORT_ACCESS = {
     "user": {"username_env": "ZABBIX_REPORT_USER", "role": REPORT_ROLE, "usergroups": [REPORT_USERGROUP]},
 }
 
+# ---------------------------------------------------------------
+# 이력 보관 기간: 전역 override (docs/aws-migration.md "데이터 보관")
+#   Linux by Zabbix agent 템플릿 아이템은 이력 31일 / 추세 365일이 기본인데, 템플릿 상속 아이템은
+#   개별 수정이 안 된다. housekeeper 전역 override 로 모든 아이템을 이력 7일 / 추세 90일로 맞춘다.
+#   근거: 일일 보고서는 48시간(이번+직전 기간)만 쓰고, 장애 사후 분석은 1주면 충분.
+#         추세(시간 단위 요약)는 월간 비교용으로 90일. EBS 40GB·DB 메모리 부담을 줄인다.
+# ---------------------------------------------------------------
+HOUSEKEEPING = {"hk_history_global": "1", "hk_history": "7d", "hk_trends_global": "1", "hk_trends": "90d"}
+
 AUTOMATION = {
     "usergroup": {"name": BOT_USERGROUP, "gui_access": "3", "hostgroup_rights": [{"hostgroup": HOST_GROUP, "permission": "2"}]},
     "user": {"username": BOT_USER, "role": "User role", "usergroups": [BOT_USERGROUP],
@@ -407,6 +416,15 @@ def ensure_automation(api, spec):
         api.call("action.create", {"name": a["name"], "eventsource": a["eventsource"], **a_params})
 
 
+def ensure_housekeeping(api, spec):
+    api.call("housekeeping.update", spec)
+
+
+def export_housekeeping(api):
+    hk = api.call("housekeeping.get", {"output": list(HOUSEKEEPING)})
+    return {k: hk[k] for k in HOUSEKEEPING}
+
+
 def ensure_report_access(api, spec):
     env = load_env()
     username, password = env.get(spec["user"]["username_env"], ""), env.get("ZABBIX_REPORT_PASSWORD", "")
@@ -497,6 +515,7 @@ def cmd_apply(api):
     ensure_media_types(api)
     ensure_automation(api, AUTOMATION)
     ensure_report_access(api, REPORT_ACCESS)
+    ensure_housekeeping(api, HOUSEKEEPING)
 
 
 def cmd_export(api):
@@ -507,7 +526,8 @@ def cmd_export(api):
     HOSTS_FILE.write_text(api.call("configuration.export", {"format": "yaml", "options": {"hosts": [h["hostid"] for h in hosts]}}))
     media = api.call("mediatype.get", {"filter": {"name": [m["name"] for m in MEDIA_TYPES]}, "output": ["mediatypeid"]})
     MEDIATYPES_FILE.write_text(api.call("configuration.export", {"format": "yaml", "options": {"mediaTypes": [m["mediatypeid"] for m in media]}}))
-    AUTOMATION_FILE.write_text(json.dumps({**export_automation(api), "report_access": export_report_access(api)},
+    AUTOMATION_FILE.write_text(json.dumps({**export_automation(api), "report_access": export_report_access(api),
+                                           "housekeeping": export_housekeeping(api)},
                                           ensure_ascii=False, indent=2) + "\n")
     for path in (TEMPLATE_FILE, HOSTS_FILE, MEDIATYPES_FILE, AUTOMATION_FILE):
         log(f"wrote {path.relative_to(REPO_ROOT)}")
@@ -538,6 +558,7 @@ def cmd_import(api):
     automation = json.loads(AUTOMATION_FILE.read_text())
     ensure_automation(api, automation)
     ensure_report_access(api, automation.get("report_access", REPORT_ACCESS))
+    ensure_housekeeping(api, automation.get("housekeeping", HOUSEKEEPING))
 
 
 def main():

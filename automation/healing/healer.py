@@ -47,7 +47,7 @@ COOLDOWN_SECONDS = int(os.environ.get("HEALER_COOLDOWN_SECONDS", "60"))
 VERIFY_TIMEOUT = int(os.environ.get("HEALER_VERIFY_TIMEOUT", "30"))
 PROXY_HOST = os.environ.get("DOCKER_PROXY_HOST", "socket-proxy")
 PROXY_PORT = int(os.environ.get("DOCKER_PROXY_PORT", "2375"))
-# 로컬 Docker(API 1.40~1.56)와 Amazon Linux 2023 기본 Docker 25(API 1.44)가 모두 지원하는 버전
+# 로컬 Docker Desktop(API 1.40~1.56)과 EC2 Ubuntu 의 docker-ce 가 모두 지원하는 버전
 DOCKER_API = "/v1.44"
 STATE_FILE = pathlib.Path(os.environ.get("STATE_FILE", "/data/state.json"))
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")

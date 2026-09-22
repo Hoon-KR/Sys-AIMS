@@ -53,7 +53,7 @@ Sys-AIMS는 컨테이너 장애를 **감지하고, 스스로 복구하고, 원�
 
 | 영역 | 기술 |
 |------|------|
-| 인프라 | AWS EC2 t4g.large (ARM64, 8GB), gp3 30GB, Amazon Linux 2023, 서울 리전 |
+| 인프라 | AWS EC2 **t3.small** (x86_64, 2 vCPU, 2GB RAM + 스왑 2GB), gp3 40GiB, **Ubuntu Server 24.04 LTS**, 서울 리전 |
 | 컨테이너 | Docker, Docker Compose |
 | 모니터링 | Zabbix Server / Web / Agent |
 | DB | PostgreSQL |
@@ -64,7 +64,8 @@ Sys-AIMS는 컨테이너 장애를 **감지하고, 스스로 복구하고, 원�
 | 알림 | Slack Incoming Webhook |
 | 개발 환경 | macOS (Apple Silicon M1, ARM64) |
 
-> 개발 환경(M1)과 운영 환경(t4g)이 모두 **arm64**라서 동일한 이미지를 사용할 수 있습니다.
+> 개발 환경(M1, arm64)과 운영 환경(t3.small, x86_64)의 아키텍처가 다릅니다. 사용하는 이미지는 모두 **amd64 + arm64 멀티 아키텍처**이고, 자체 이미지는 amd64 빌드까지 확인했습니다([docs/aws-migration.md](docs/aws-migration.md)).
+> 2GB RAM에 맞춰 컨테이너 메모리 상한 합계를 약 1GB로 조정했습니다(실측 peak 기반).
 
 ---
 

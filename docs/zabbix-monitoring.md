@@ -24,6 +24,7 @@ python3 scripts/zabbix_config.py import   # 새 환경(EC2)에 재현
 | 호스트 `rca` | `/health` 감시, `{$HEALING.MODE}=off` |
 | Self-Healing Action, 미디어 타입, 전용 사용자 | [self-healing.md](self-healing.md) |
 | 보고서용 읽기 전용 계정 (역할·그룹·사용자) | [daily-report.md](daily-report.md) |
+| 이력 보관 기간 (전역 override: 이력 7일 / 추세 90일) | `housekeeping.update`, 근거는 [aws-migration.md 메모리 예산](aws-migration.md) |
 | 기본 호스트 `Zabbix server` | Linux 템플릿 unlink+clear, agent 인터페이스 제거 ([troubleshooting #1](troubleshooting.md)) |
 
 ### HTTP 체크 아이템 `http.status.code`

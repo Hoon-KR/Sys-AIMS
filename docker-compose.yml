@@ -9,13 +9,18 @@
 # 환경마다 달라지는 값과 시크릿은 .env에서 주입한다 (cp .env.example .env).
 # 서비스명, 튜닝값, 보안 정책 같은 구조 설정은 리뷰 가능하도록 이 파일에 고정한다.
 #
-# 이미지 버전 (모두 arm64 manifest 확인 — M1 / t4g 공통):
+# 이미지 버전 (모두 amd64 + arm64 멀티 아키텍처 확인 — 로컬 M1(arm64) / EC2 t3.small(x86) 공통):
 #   postgres:16.15-alpine3.24        Zabbix 7.0 지원 범위 내 메이저, alpine 경량
 #   zabbix-*:alpine-7.0.30           7.0 LTS 최신 패치. server/web/agent 버전 일치 필수
 #   nginx:1.30.5-alpine3.24          stable 브랜치, 정적 페이지 서빙용 최소 이미지
 # =============================================================
 
 name: sys-aims
+
+# 메모리 상한 (EC2 t3.small = 2GB RAM + 스왑 2GB, docs/aws-migration.md "메모리 예산")
+#   실측 peak(memory.peak) 대비 여유를 두되 합계 약 1GB (Nginx·certbot 추가 시 약 1.07GB)
+#   postgres 320 / zabbix-server 128 / zabbix-web 160 / agent 64 / reporter 96 / rca 64 /
+#   healer 48 / socket-proxy 32 / pitwall_web 32 / pitwall_api 32  (MB)
 
 # 로그 로테이션: EC2 소용량 디스크에서 docker 로그가 무한히 쌓이지 않도록
 x-logging: &default-logging
@@ -40,6 +45,22 @@ services:
     image: postgres:16.15-alpine3.24
     container_name: postgres
     restart: unless-stopped
+    # 2GB 인스턴스용 메모리 억제 (실측: 연결 31개 중 Zabbix 27개, shared_buffers 사용 83MB)
+    #   shared_buffers 128MB→64MB : 공유 메모리 상한. 데이터가 쌓여도 이 이상 커지지 않는다
+    #   max_connections 100→50    : 연결당 메모리 상한 (Zabbix 27 + web 최대 6 + 여유)
+    #   work_mem 2MB / maintenance_work_mem 32MB : 정렬·housekeeper 삭제 시 순간 사용량 억제
+    command:
+      - postgres
+      - -c
+      - shared_buffers=64MB
+      - -c
+      - max_connections=50
+      - -c
+      - work_mem=2MB
+      - -c
+      - maintenance_work_mem=32MB
+      - -c
+      - effective_cache_size=192MB
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
@@ -58,7 +79,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
+          memory: 320M
     logging: *default-logging
 
   # -----------------------------------------------------------
@@ -104,7 +125,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 384M
+          memory: 128M
     logging: *default-logging
 
   # -----------------------------------------------------------
@@ -124,6 +145,13 @@ services:
       ZBX_SERVER_HOST: zabbix-server
       ZBX_SERVER_NAME: Sys-AIMS
       PHP_TZ: ${TZ:?TZ is required}
+      # php-fpm 워커 제한: 이미지 기본값은 최대 50개(워커당 약 35MB) → 트래픽이 몰리면 2GB를 넘길 수 있다
+      PHP_FPM_PM: dynamic
+      PHP_FPM_PM_MAX_CHILDREN: "6"
+      PHP_FPM_PM_START_SERVERS: "2"
+      PHP_FPM_PM_MIN_SPARE_SERVERS: "1"
+      PHP_FPM_PM_MAX_SPARE_SERVERS: "3"
+      PHP_FPM_PM_MAX_REQUESTS: "500"   # 워커 재생성으로 메모리 누적 방지
       TZ: ${TZ:?TZ is required}
     networks:
       - zbx_db
@@ -138,7 +166,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M
+          memory: 160M
     logging: *default-logging
 
   # -----------------------------------------------------------
@@ -170,7 +198,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 128M
+          memory: 64M
     logging: *default-logging
 
   # -----------------------------------------------------------
@@ -208,7 +236,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 64M
+          memory: 32M
     logging: *default-logging
 
   # -----------------------------------------------------------
@@ -261,7 +289,7 @@ services:
       - "-stoponwatchdog"
     # 이미지는 비root(65534)로 실행된다. 소켓(권한 660)의 소유 그룹을 추가해야 접근 가능:
     #   Docker Desktop(맥) → root:root  → DOCKER_GID=0
-    #   EC2(Amazon Linux)  → root:docker → DOCKER_GID=$(getent group docker | cut -d: -f3)
+    #   EC2(Ubuntu)        → root:docker → DOCKER_GID=$(getent group docker | cut -d: -f3)
     # (docs/aws-migration.md 참고)
     group_add:
       - "${DOCKER_GID:?DOCKER_GID is required}"
@@ -335,7 +363,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 64M
+          memory: 48M
     logging: *default-logging
 
   # -----------------------------------------------------------
@@ -431,7 +459,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 128M
+          memory: 96M
     logging: *default-logging
 
 networks:

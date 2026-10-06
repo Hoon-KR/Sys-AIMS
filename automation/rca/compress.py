@@ -8,11 +8,15 @@ Zabbix HTTP 체크) 200 응답 줄이었다. 원문 그대로 보내면 토큰 �
   2) 패턴 압축: 타임스탬프/IP/PID/숫자를 정규화해 같은 패턴은 **최신 N건만** 남기고
      생략한 건수를 표시한다 (원인 분석엔 장애 직전 줄이 중요하므로 뒤에서부터 센다)
   3) 글자 수 상한: 최신 줄부터 채우고 넘치는 오래된 줄은 버린다
-  4) 민감정보 마스킹 (OpenAI/Slack으로 나가기 전)
+  4) 민감정보 마스킹 (OpenAI/Slack으로 나가기 전) — common.redact 가 담당
 """
 
 import re
 from collections import Counter
+
+from common.redact import redact      # 전송 경계의 마스킹은 한 곳에서만 정의한다
+
+__all__ = ["normalize", "redact", "compress"]
 
 _NORMALIZERS = [
     (re.compile(r"\[\d\d/\w{3}/\d{4}:\d\d:\d\d:\d\d [+-]\d{4}\]"), "[ts]"),     # nginx access
@@ -23,25 +27,11 @@ _NORMALIZERS = [
     (re.compile(r"\b\d+\b"), "<n>"),
 ]
 
-_SECRETS = [
-    (re.compile(r"sk-[A-Za-z0-9_\-]{16,}"), "sk-[REDACTED]"),
-    (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]{8,}"), "Bearer [REDACTED]"),
-    (re.compile(r"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key)\b(\s*[=:]\s*)\S+"), r"\1\2[REDACTED]"),
-    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "AKIA[REDACTED]"),
-    (re.compile(r"https://hooks\.slack\.com/services/\S+"), "https://hooks.slack.com/services/[REDACTED]"),
-]
-
 
 def normalize(line):
     for pattern, repl in _NORMALIZERS:
         line = pattern.sub(repl, line)
     return line.strip()
-
-
-def redact(text):
-    for pattern, repl in _SECRETS:
-        text = pattern.sub(repl, text)
-    return text
 
 
 def compress(lines, max_chars, max_line_chars=500, keep_per_pattern=3):

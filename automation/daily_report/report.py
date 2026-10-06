@@ -20,6 +20,7 @@ import string
 import time
 
 from common import llm, quota, slack
+from common.redact import redact
 from common.eventlog import EventLog
 from daily_report import collect, site
 
@@ -380,6 +381,8 @@ def generate(*, kind, end, hours, use_ai=True, notify=True, zabbix_url=None):
     coverage = overall_coverage(cur)
     v = verdict(cur, coverage)
     ai_input, ai_input_text = build_ai_input(cur, prev, v)
+    # 외부로 나가기 전 마스킹. number_check 도 같은 본문과 대조해야 하므로 여기서 한 번만 한다
+    ai_input_text = redact(ai_input_text)
     period = f"{fmt_time(start)} ~ {fmt_time(end)} KST ({hours:g}시간)"
     prev_period = f"{fmt_time(prev_start)} ~ {fmt_time(start)} KST"
 
@@ -430,7 +433,9 @@ def generate(*, kind, end, hours, use_ai=True, notify=True, zabbix_url=None):
 
     notified = None
     if notify:
-        notified = slack.post(SLACK_WEBHOOK_URL, *slack_message(name, title_date, period, cur, ai, ai_error, coverage, v))
+        _text, _blocks = slack_message(name, title_date, period, cur, ai, ai_error, coverage, v)
+        notified = slack.post(SLACK_WEBHOOK_URL, redact(_text),
+                              json.loads(redact(json.dumps(_blocks, ensure_ascii=False))))
     record = log.write("report.completed", name=name, kind=kind, coverage_pct=coverage, overall_status=v["status"],
                        verdict_reasons=v["danger_reasons"] + v["caution_reasons"],
                        ai_error=ai_error, errors=cur["errors"], number_check=check, usage=usage, latency_s=meta.get("latency_s"),

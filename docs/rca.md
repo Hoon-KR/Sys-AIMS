@@ -201,11 +201,51 @@ rca (작업자 1개, 대기열 3개)
 ## API 키 보호
 - 키는 **rca 컨테이너의 환경변수에만** 있습니다.
 - 오류 메시지는 기록하기 전에 키 문자열과 `sk-…` 패턴을 치환합니다. 요청 헤더는 기록하지 않습니다.
-- OpenAI와 Slack으로 나가는 로그는 `sk-…`, `Bearer …`, `password=`/`token=`, AWS 키, Slack webhook URL 패턴을 마스킹합니다.
+- OpenAI와 Slack으로 나가는 본문은 **`common.redact`** 한 곳을 통과합니다(아래 절).
 - **검증 (2026-09-19)**: 실제 키 값을 다음 11곳에서 직접 검색해 모두 0건이었습니다.
   - rca/healer `docker logs`, `rca.jsonl`, `healer.jsonl`, `rca_state.json`
   - healer, socket-proxy, zabbix-server 컨테이너 환경변수
   - Zabbix export 파일, git 작업 트리, 이미지 레이어
+
+---
+
+## 전송 경계 마스킹 (`common/redact.py`)
+
+**불변식: 외부(OpenAI / Slack)로 나가는 모든 본문은 `redact()`를 통과한다.** 적용 지점은 두 곳입니다.
+
+| 경로 | 적용 지점 |
+|---|---|
+| RCA | `compress()`가 전송 직전에 호출. **근거 대조(`verify_evidence`)도 마스킹된 본문과 비교**하므로 AI가 `<ip-1>`을 인용해도 검증이 성립합니다 |
+| 일일 보고서 | `build_ai_input()` 결과와 Slack 본문에 호출. `number_check`도 같은 본문과 대조합니다 |
+
+**과잉 마스킹은 분석을 망가뜨립니다.** 그래서 가리는 것과 남기는 것을 명시적으로 나눕니다.
+
+| 가린다 | 처리 |
+|---|---|
+| IPv4 (loopback 제외) | `<ip-1>`, `<ip-2>` — **한 호출 안에서 일관된 가명**. "같은 클라이언트의 반복 요청"이라는 추론은 살리고 값만 제거합니다. 포트는 유지(`<ip-1>:8080`) |
+| EC2 내부 호스트명 | `<host-1>`. 이름 안에 사설 IP가 들어 있어 **IP 규칙보다 먼저** 적용합니다 |
+| 이메일 / 휴대전화 / 주민등록번호 | `[REDACTED-EMAIL]` / `[REDACTED-PHONE]` / `[REDACTED-RRN]` |
+| 카드번호 | `[REDACTED-CARD]` — **Luhn 검증을 통과한 것만** |
+| 비밀값 | `sk-…`, `Bearer …`, `password=`/`token=`, AWS 액세스 키, Slack webhook URL |
+| AWS 식별자 | 인스턴스 ID(`i-…`), ARN(계정 ID 포함) |
+
+| 남긴다 | 이유 |
+|---|---|
+| **컨테이너·서비스명** (`pitwall_web`, `pitwall_api`) | 공개 저장소에 이미 있는 자체 서비스명. 가리면 AI가 "무엇이 죽었는지" 말할 수 없습니다 |
+| 상태 코드 · 포트 · 바이트 수 · 버전 문자열 | 원인 분석에 필수. 오탐 금지 대상으로 테스트에 고정했습니다 |
+| `127.0.0.0/8`, `0.0.0.0` | 식별 정보가 아니고 진단에 쓰입니다(Docker 내장 DNS `127.0.0.11` 포함) |
+
+**의도적으로 하지 않는 것**
+
+- **유선전화 번호**: `02-123-4567` 형태는 로그의 숫자열과 구분이 어려워 오탐이 많습니다. 제외했습니다.
+- **맨숫자 12자리를 AWS 계정 ID로 추측**: 바이트 수나 epoch 밀리초를 오탐할 위험이 더 큽니다. ARN 안의 계정 ID만 가립니다.
+- 두 항목 모두 한계로 기록하고, 계열사 로그에 실제로 섞여 들어오면 패턴을 추가합니다.
+
+**테스트**: `automation/tests/test_redact.py` (14건). "가려야 할 것"과 **"건드리면 안 되는 것"을 같은 비중으로** 고정합니다.
+
+```bash
+python3 -m unittest discover -s automation/tests -t automation
+```
 
 ---
 

@@ -15,6 +15,8 @@
 # =============================================================
 set -euo pipefail
 
+# ⚠️ 이 배열들은 반드시 apt-get **뒤에** 붙인다.
+#    sudo 앞쪽에 두면 sudo 가 -o 를 자기 옵션으로 해석해 실패한다.
 APT_OPTS=(-o DPkg::Lock::Timeout=300)
 DPKG_OPTS=(-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
 SWAP_FILE=/swapfile
@@ -30,14 +32,15 @@ if [ "$(id -u)" -eq 0 ]; then
 fi
 TARGET_USER="$(id -un)"
 
-if ! grep -q '^VERSION_CODENAME=noble' /etc/os-release 2>/dev/null; then
-    echo "오류: Ubuntu 24.04(noble)에서만 검증했습니다. 현재: $(. /etc/os-release && echo "$PRETTY_NAME")" >&2
+OS_RELEASE="${OS_RELEASE:-/etc/os-release}"     # 테스트에서만 바꿔 끼운다
+if ! grep -q '^VERSION_CODENAME=noble' "$OS_RELEASE" 2>/dev/null; then
+    echo "오류: Ubuntu 24.04(noble)에서만 검증했습니다. 현재: $(. "$OS_RELEASE" && echo "$PRETTY_NAME")" >&2
     exit 1
 fi
 
 # ---------------------------------------------------------------- 1. apt 전체 업데이트
 step "1/5 apt 전체 업데이트"
-sudo "${APT_OPTS[@]}" apt-get update
+sudo apt-get "${APT_OPTS[@]}" update
 if [ -n "$(apt list --upgradable 2>/dev/null | tail -n +2)" ]; then
     # 제거되는 패키지가 있으면 멈춘다 (사람이 확인해야 할 상황)
     removals=$(sudo apt-get -s full-upgrade | grep '^Remv' || true)
@@ -46,11 +49,11 @@ if [ -n "$(apt list --upgradable 2>/dev/null | tail -n +2)" ]; then
         echo "$removals" >&2
         exit 1
     fi
-    sudo DEBIAN_FRONTEND=noninteractive "${APT_OPTS[@]}" "${DPKG_OPTS[@]}" apt-get -y full-upgrade
+    sudo DEBIAN_FRONTEND=noninteractive apt-get "${APT_OPTS[@]}" "${DPKG_OPTS[@]}" -y full-upgrade
 else
     skip "업그레이드 대상 없음"
 fi
-sudo "${APT_OPTS[@]}" apt-get install -y ca-certificates curl git python3
+sudo apt-get "${APT_OPTS[@]}" install -y ca-certificates curl git python3
 
 # ---------------------------------------------------------------- 2. 스왑 2GB
 step "2/5 스왑 ${SWAP_SIZE}"
@@ -62,7 +65,7 @@ else
     sudo mkswap "$SWAP_FILE" >/dev/null
     sudo swapon "$SWAP_FILE"
 fi
-if grep -q "^${SWAP_FILE}[[:space:]]" /etc/fstab; then
+if grep -q "^${SWAP_FILE}[[:space:]]" /etc/fstab 2>/dev/null; then
     skip "fstab 항목 존재"
 else
     echo "$SWAP_FILE none swap sw 0 0" | sudo tee -a /etc/fstab >/dev/null
@@ -81,8 +84,8 @@ else
     sudo chmod a+r /etc/apt/keyrings/docker.asc
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable" \
         | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
-    sudo "${APT_OPTS[@]}" apt-get update
-    sudo "${APT_OPTS[@]}" apt-get install -y \
+    sudo apt-get "${APT_OPTS[@]}" update
+    sudo apt-get "${APT_OPTS[@]}" install -y \
         docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 fi
 
@@ -104,19 +107,20 @@ fi
 
 # ---------------------------------------------------------------- 요약
 step "요약"
-printf '%-18s %s\n' "호스트명"    "$(hostname)"
-printf '%-18s %s\n' "사설 IP"     "$(hostname -I | awk '{print $1}')"
-printf '%-18s %s\n' "커널"        "$(uname -r)"
-printf '%-18s %s\n' "스왑"        "$(swapon --show=SIZE,USED --noheadings | tr -s ' ' | paste -sd' ' -)"
-printf '%-18s %s\n' "디스크 여유" "$(df -h --output=avail / | tail -1 | tr -d ' ')"
-printf '%-18s %s\n' "docker"      "$(docker --version 2>/dev/null || echo '(재로그인 필요)')"
-printf '%-18s %s\n' "compose"     "$(docker compose version --short 2>/dev/null || echo '(재로그인 필요)')"
-printf '%-18s %s\n' "DOCKER_GID"  "$(getent group docker | cut -d: -f3)"
-printf '%-18s %s\n' "hold"        "$(apt-mark showhold | paste -sd' ' -)"
+# %-18s 는 한글이 멀티바이트라 정렬이 깨진다 → 라벨: 값 형식으로 둔다
+echo "호스트명:    $(hostname)"
+echo "사설 IP:     $(hostname -I | awk '{print $1}')"
+echo "커널:        $(uname -r)"
+echo "스왑:        $(swapon --show=SIZE,USED --noheadings | tr -s ' ' | paste -sd' ' -)"
+echo "디스크 여유: $(df -h --output=avail / | tail -1 | tr -d ' ')"
+echo "docker:      $(docker --version 2>/dev/null || echo '(없음)')"
+echo "compose:     $(docker compose version --short 2>/dev/null || echo '(없음)')"
+echo "DOCKER_GID:  $(getent group docker | cut -d: -f3)   ← 2일차 socket-proxy 에 넣을 값"
+echo "hold:        $(apt-mark showhold | paste -sd' ' -)"
 
 if [ -f /var/run/reboot-required ]; then
     printf '\n\033[1m재부팅이 필요합니다\033[0m (커널/libc 갱신). 다음 단계 전에:\n  sudo reboot\n'
-    printf '요구 패키지: %s\n' "$(paste -sd' ' - < /var/run/reboot-required.pkgs 2>/dev/null)"
+    printf '요구 패키지: %s\n' "$(sort -u /var/run/reboot-required.pkgs 2>/dev/null | paste -sd' ' -)"
 else
     printf '\n재부팅 필요 없음.\n'
 fi

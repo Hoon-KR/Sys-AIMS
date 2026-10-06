@@ -329,6 +329,10 @@ services:
         condition: service_healthy
     environment:
       TARGET_CONTAINER: ${TARGET_CONTAINER:?TARGET_CONTAINER is required}
+      # 여러 서버(계열사)의 대상 목록 (ADR-0002). 비우면 이 서버의 TARGET_CONTAINER 하나만
+      # 다루는 기존 동작이다 — VM 분리 전 구성과 로컬 개발이 그대로 돌아간다.
+      #   예: [{"company":"A","container":"pitwall_web","proxy":"172.31.9.142:2375"}, ...]
+      HEAL_TARGETS: ${HEAL_TARGETS:-}
       HEALER_TOKEN: ${HEALER_TOKEN:?HEALER_TOKEN is required}
       HEALER_MAX_RESTARTS: ${HEALER_MAX_RESTARTS:?HEALER_MAX_RESTARTS is required}
       HEALER_WINDOW_SECONDS: ${HEALER_WINDOW_SECONDS:?HEALER_WINDOW_SECONDS is required}

@@ -182,4 +182,4 @@ sh scripts/fetch_reports.sh && open reports/index.html      # 로컬에서 보�
 - [x] AI RCA → Slack (토큰 상한, 일일 한도, 근거 원문 대조)
 - [x] 발표용 장애 시나리오 (의존 서비스 장애, 설정 오류 — docs/chaos-scenarios.md)
 - [x] AI 일일점검 보고서 (컨테이너 스케줄러, 읽기 전용 Zabbix 계정, HTML + Basic Auth — docs/daily-report.md)
-- [ ] AWS EC2 이전 + Let's Encrypt (작업 목록: docs/aws-migration.md)
+- [x] AWS EC2 이전 + Let's Encrypt (2026-10-06 배포·검증 완료 — docs/aws-migration.md C장)

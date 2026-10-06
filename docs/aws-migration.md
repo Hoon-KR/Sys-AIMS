@@ -89,11 +89,58 @@
 | Nginx + certbot + duckdns | | | +112M (32/64/16) | | prod 추가분 → **총 약 1.09G** |
 
 - **OOM kill 0건**(`memory.events`). 웹 요청 300/300, API 100/100이 모두 200이었고, 장애 시나리오와 보고서도 정상 동작했습니다(2026-09-19, 로컬).
+
+#### EC2 실측 (2026-10-06, t3.small / Ubuntu 24.04 / 커널 7.0.0-1014-aws)
+
+부하(공개 HTTPS 300/300, `pitwall_web` 300/300, `pitwall_api` 100/100) → 자동 복구 5회 → 장애 시나리오 2종 → 보고서 1회를 **모두 거친 뒤**의 누적 peak입니다(`memory.peak`은 컨테이너 시작 이후 최고값).
+
+| 서비스 | 상한 | EC2 peak | % | 로컬 peak | oom_kill |
+|---|---:|---:|---:|---:|---:|
+| postgres | 320M | **320.0M** | **100%** | 119M | 0 |
+| zabbix-web | 160M | 85.8M | 54% | 65M | 0 |
+| zabbix-server | 128M | 72.1M | 56% | 54M | 0 |
+| certbot | 64M | 57.2M | 89% | — | 0 |
+| reporter | 96M | 43.9M | 46% | 43M | 0 |
+| healer | 48M | 39.7M | 83% | 31M | 0 |
+| rca | 64M | 32.1M | 50% | 44M | 0 |
+| zabbix-agent | 64M | 17.1M | 27% | 34M | 0 |
+| socket-proxy | 32M | 16.1M | 50% | 12M | 0 |
+| duckdns | 16M | 13.2M | 82% | — | 0 |
+| nginx | 32M | 9.9M | 31% | — | 0 |
+| pitwall_web / api | 32M / 32M | 8.1M / 8.1M | 25% / 25% | 16M / 18M | 0 |
+| **합계** | **1.09G** | **723M** | 65% | 347M | **0** |
+
+- **oom_kill 0건.** 호스트는 935Mi 사용 / 970Mi 여유, 스왑은 4.4Mi만 건드렸고 `vmstat`의 `si/so`가 0이었습니다. 즉 **스왑으로 버틴 게 아니라 RAM 안에서 끝났습니다.**
+- **postgres가 상한 100%인 것은 OOM 징후가 아닙니다.** cgroup v2는 상한에 닿으면 **페이지 캐시를 먼저 회수**하고, 그래도 부족할 때만 OOM kill을 합니다. postgres는 DB 파일을 읽고 쓰는 과정에서 **회수 가능한 파일 캐시로 상한까지 채우는 것이 정상 동작**입니다.
+  - 맥에서 119M로 낮게 나온 것은 Docker Desktop이 VM 안에서 돌아 파일 캐시가 컨테이너 cgroup에 그대로 계상되지 않기 때문입니다. **EC2 쪽이 실제 운영값입니다.**
+  - 위험 여부는 peak이 아니라 `memory.stat`의 `anon`(회수 불가)으로 판단합니다. 판단 기준은 아래 PostgreSQL 절에 있습니다.
 - **OS 몫**: 2GB에서 상한 합계 1.09G를 빼면 약 0.9GB가 남습니다. Ubuntu, Docker Engine, containerd, 페이지 캐시가 이 안에서 씁니다.
 - **스왑 2GB는 필수입니다.** 상한 합계가 RAM에 들어가더라도 다음 상황에서 순간 초과가 날 수 있습니다.
   - 이미지 빌드(`docker compose build`)
   - postgres의 housekeeper 대량 삭제
   - apt 업그레이드
+
+### PostgreSQL: 상한 100%를 읽는 법 (EC2)
+
+`memory.peak`이 상한과 같아도 그 자체로는 문제가 아닙니다. 다음 세 값으로 판단합니다.
+
+```bash
+cid=$(docker inspect -f '{{.Id}}' postgres)
+g=$(find /sys/fs/cgroup -maxdepth 4 -name "docker-$cid.scope")
+grep -E '^(anon|file|slab|kernel) ' $g/memory.stat   # anon = 회수 불가
+cat $g/memory.events                                 # max = 상한 도달(회수), oom/oom_kill = 위험
+cat $g/memory.pressure                               # full avg60 ≈ 0 이면 지연 없음
+```
+
+| 관측 | 해석 | 조치 |
+|---|---|---|
+| `anon` < 220M, `oom_kill` 0, `full avg60` ≈ 0 | 상한의 대부분이 **회수 가능한 파일 캐시**. 설계대로 동작 중 | **상한 유지** |
+| `anon` > 260M | 프로세스 자체가 상한에 접근 → OOM 위험 | 상한 320M → **384M** (예산 1.09G → 1.15G, 2GB RAM에 여유 있음) |
+| `full avg60` > 1% 지속 | 캐시 회수가 잦아 I/O 지연 발생 | 위와 같이 상한 상향 |
+| `oom_kill` > 0 | 이미 강제 종료 발생 | 즉시 상향 + `shared_buffers` 재검토 |
+
+- `shared_buffers`를 더 줄이는 것은 **권하지 않습니다.** 이미 64MB이고(로컬 실측 사용량 83MB), 더 줄이면 공유 버퍼가 부족해 디스크 I/O가 늘어 체감 성능만 나빠집니다. 상한 100%의 원인은 공유 버퍼가 아니라 파일 캐시입니다.
+- **Zabbix housekeeper가 돈 뒤 한 번 더 확인하세요**(기본 1시간 주기). 대량 삭제가 `anon`을 가장 크게 밀어 올리는 구간입니다.
 
 ### PostgreSQL: 데이터가 쌓여도 메모리가 늘지 않게
 | 설정 | 값 | 효과 |
@@ -344,18 +391,25 @@ dig +short sys-aims.duckdns.org   # 현재 퍼블릭 IP와 일치
 
 ## C. 이전 후 검증
 
-| 항목 | 명령 | 기대 |
-|---|---|---|
-| 아키텍처 / OS | `uname -m; lsb_release -ds` | `x86_64`, Ubuntu 24.04 |
-| 스왑 | `free -h` | Swap 2.0Gi |
-| 전체 상태 | `docker compose ... ps` | 10개 서비스 + Nginx/certbot healthy |
-| socket-proxy 권한 | `docker logs socket-proxy` | `permission denied` 없음 |
-| **메모리** | 각 컨테이너 `cat /sys/fs/cgroup/memory.peak`, `memory.events`의 `oom_kill` | 상한 이하, **oom_kill 0** |
-| 호스트 여유 | `free -h`, `vmstat 5 3` | 스왑 사용이 지속 증가하지 않음 |
-| HTTPS | `curl -I https://sys-aims.duckdns.org` | 유효한 인증서 |
-| DNS 갱신 | `dig +short sys-aims.duckdns.org` | 현재 퍼블릭 IP와 일치 |
-| 보고서 인증 | `/reports/` 인증 없이 / 있이 | 401 / 200 |
-| 자동 복구 측정 | `python3 scripts/measure_detection.py --mode heal --trials 5` | 로컬(평균 24.8초)과 비교 |
-| 장애 시나리오 | `python3 scripts/chaos.py dependency --watch` → `restore` | 분류 `dependency` |
-| 보고서 | `docker exec reporter python -m daily_report.run --hours 1` | 수집률 ~100%, Slack에 링크 |
-| 복구 확인 지연 (#4) | 위 측정의 Zabbix 기준 다운타임 | 로컬 평균 45.8초와 비교 |
+**아래는 2026-10-06에 실제로 전부 실행한 결과입니다.**
+
+| 항목 | 명령 | 기대 | **EC2 실측 (2026-10-06)** |
+|---|---|---|---|
+| 아키텍처 / OS | `uname -m; lsb_release -ds` | `x86_64`, Ubuntu 24.04 | ✅ x86_64 / 24.04.4 LTS, 커널 7.0.0-1014-aws |
+| 스왑 | `free -h` | Swap 2.0Gi | ✅ 2.0Gi (`swappiness=10`) |
+| 전체 상태 | `docker compose ... ps` | 13개 컨테이너 healthy | ✅ 13/13 |
+| socket-proxy 권한 | `docker logs socket-proxy` | `permission denied` 없음 | ✅ (`DOCKER_GID=988`) |
+| **메모리** | 각 컨테이너 `memory.peak`, `memory.events`의 `oom_kill` | 상한 이하, **oom_kill 0** | ✅ peak 합계 723M / 1.09G, **oom_kill 0**. postgres만 100%(파일 캐시, 2장) |
+| 호스트 여유 | `free -h`, `vmstat 5 3` | 스왑 사용이 지속 증가하지 않음 | ✅ 970Mi 여유, 스왑 4.4Mi, `si/so` 0 |
+| 부하 | 공개 HTTPS / `pitwall_web` / `pitwall_api` | 모두 200 | ✅ 300/300, 300/300, 100/100 |
+| HTTPS | `curl -I https://sys-aims.duckdns.org` | 유효한 인증서 | ✅ HTTP/2 200, `ssl_verify_result 0`, HSTS, ECDSA 89일 |
+| DNS 갱신 | `getent hosts sys-aims.duckdns.org` | 현재 퍼블릭 IP와 일치 | ✅ 43.201.27.97 일치 (`duckdns: OK`) |
+| 보고서 인증 | `/reports/` 인증 없이 / 있이 | 401 / 200 | ✅ 401 / 200, `.state/` 403 |
+| 자동 복구 측정 | `python3 scripts/measure_detection.py --mode heal --trials 5` | 로컬(평균 24.8초)과 비교 | ✅ **평균 20.0초** (로컬보다 4.8초 빠름), Action 5/5 `sent` |
+| 장애 시나리오 | `python3 scripts/chaos.py dependency\|config --watch` → `restore` | 분류 `dependency` / `config_error` | ✅ 2/2 정확, 근거 원문 5/5 일치, 각 4.9초 |
+| 보고서 | `docker exec reporter python -m daily_report.run` | Slack에 링크 | ✅ 생성·Slack 링크 정상, `number_check` 11개 / `unknown` 0 |
+| 복구 확인 지연 (#4) | 위 측정의 Zabbix 기준 다운타임 | 로컬 평균 45.8초와 비교 | ✅ 평균 44.9초 — **로컬과 동일한 지연이 재현됨** |
+| 설정 재현성 | 서버에서 `zabbix_config.py export` → `git status` | 변경 없음 | ✅ 변경 없음 (로컬 정의가 그대로 재현) |
+
+- **첫 스케줄 보고서(11:20)는 수집률 0%로 실패**했습니다. `zabbix_config.py import` 전이라 읽기 전용 계정이 아직 없었기 때문이고, Zabbix는 "없는 계정"과 "틀린 비밀번호"를 같은 메시지로 돌려줍니다. 계정 차단이 아닙니다([troubleshooting.md](troubleshooting.md)).
+- **배포 당일 보고서의 "위험" 판정은 정상입니다.** 수집률 8.7%(데이터가 몇 시간뿐), 자동 복구 실패 2건·장애 8건(검증으로 일부러 만든 것)이 근거입니다. 24시간이 지나면 기준이 정상화됩니다.

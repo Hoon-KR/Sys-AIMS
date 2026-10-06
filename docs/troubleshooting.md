@@ -154,6 +154,26 @@ host.get → "Zabbix server" 의 interfaces: 127.0.0.1:10050, available=2 (연�
 
 ---
 
+## 10. EC2 첫 배포 직후 스케줄 보고서가 "계정이 차단되었습니다"로 실패했다
+
+- **발생**: 2026-10-06, EC2 배포 당일 11:20 정기 보고서
+- **증상**: 수집률 0%로 보고서가 생성되고, reporter 로그에 `Incorrect user name or password or account is temporarily blocked`가 남았습니다. 같은 날 13:46 수동 실행은 정상이었습니다.
+- **원인**: **계정 차단이 아니라 계정이 아직 없었던 것입니다.** 읽기 전용 보고서 계정(`ZABBIX_REPORT_USER`)은 `scripts/zabbix_config.py import`가 만드는데, 11:20에는 import 전이었습니다. Zabbix는 사용자 열거(user enumeration)를 막기 위해 **"없는 계정"과 "틀린 비밀번호"에 같은 메시지**를 돌려줍니다.
+- **차단 여부를 구분하는 방법**: `user.get`의 `attempt_failed`(연속 실패 횟수)와 `attempt_clock`(마지막 실패 시각)을 봅니다. Zabbix 기본값은 **5회 연속 실패 시 30초 차단**이고 자동으로 풀립니다. 스케줄러는 실행당 1회만 시도하므로 5회에 도달할 수 없습니다.
+  ```bash
+  cd ~/sys-aims && python3 -c "
+  import sys,time; sys.path.insert(0,'automation')
+  from common.zabbix_api import ZabbixAPI
+  api=ZabbixAPI.from_env()
+  for u in api.call('user.get',{'output':['username','attempt_failed','attempt_clock']}):
+      print(u['username'], '실패', u['attempt_failed'], '회')
+  api.logout()"
+  ```
+  실제로 차단된 경우에만 `user.unblock`(또는 웹 UI의 Users → Unblock)으로 해제합니다.
+- **대응**: 순서를 지키면 발생하지 않습니다 — **`import`를 먼저, 그 다음 스케줄 보고서**. 첫 배포가 `REPORT_TIME` 직전이면 첫 정기 보고서 1회는 건너뛰고 수동 실행(`docker exec reporter python -m daily_report.run`)으로 확인합니다.
+
+---
+
 ## 참고: 컨테이너 agent에서 not supported인 아이템
 
 `Linux by Zabbix agent`를 컨테이너 agent에 적용하면 일부 아이템이 not supported가 됩니다(로컬에서 154개 중 10개).

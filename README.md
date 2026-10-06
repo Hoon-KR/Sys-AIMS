@@ -137,11 +137,15 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml ps
 > `pitwall_web`은 의도적으로 `restart: "no"`입니다. 복구 주체는 Zabbix Action이어야 하기 때문입니다.
 > Docker 소켓 접근 방식은 [ADR-0001](docs/adr/0001-docker-socket-access.md)을 참고하세요.
 
-### 5.3 프로덕션 배포 (HTTPS)
+### 5.3 프로덕션 배포 (HTTPS, AWS EC2)
 ```bash
-# TODO
-# docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+alias dc='docker compose -f docker-compose.yml -f docker-compose.prod.yml'
+dc up -d --build --wait          # nginx(80/443) + certbot + duckdns 포함
 ```
+- 공개 진입점은 nginx 하나입니다. Zabbix Web은 `127.0.0.1:8080`(설정 스크립트용)에만 바인딩됩니다.
+- 최초 1회: Basic Auth 파일 생성 → 인증서 발급 → `10-https.conf.off` 활성화.
+- 탄력적 IP 없이 `duckdns` 컨테이너가 5분마다 퍼블릭 IP를 갱신합니다.
+- 전체 순서와 확인 방법은 [docs/aws-migration.md](docs/aws-migration.md)에 있습니다.
 
 ### 5.4 Zabbix 설정 가져오기
 ```bash
@@ -171,8 +175,8 @@ sh scripts/fetch_reports.sh && open reports/index.html      # 로컬에서 보�
 ## 7. 로드맵
 - [x] 프로젝트 골격 및 문서
 - [x] Docker Compose base + local
-- [ ] Docker Compose prod (HTTPS / certbot)
-- [ ] Nginx 설정 (local HTTP / prod HTTPS)
+- [x] Docker Compose prod (Nginx + certbot + DuckDNS 자동 갱신)
+- [x] Nginx 설정 (local HTTP / prod HTTPS)
 - [x] Zabbix 호스트, 템플릿, 트리거 (API + YAML export)
 - [x] Self-Healing (socket-proxy + healer + Zabbix Action, 서킷 브레이커, 에스컬레이션)
 - [x] AI RCA → Slack (토큰 상한, 일일 한도, 근거 원문 대조)

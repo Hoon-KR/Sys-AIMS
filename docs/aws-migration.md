@@ -7,6 +7,7 @@
 | OS | **Ubuntu Server 24.04 LTS** (x86) |
 | 네트워크 | 서울 리전(ap-northeast-2), Default VPC, 퍼블릭 서브넷 |
 | 도메인 | `sys-aims.duckdns.org` (Let's Encrypt HTTPS) |
+| 퍼블릭 IP | **탄력적 IP 없음**(IAM 권한 제약) → 중지·시작 때 바뀌는 IP를 **DuckDNS 컨테이너가 5분마다 갱신** |
 
 로컬(맥, arm64)에서 구현과 검증을 마친 뒤 EC2로 옮길 때 해야 할 작업입니다.
 **⛔ 차단**으로 표시된 항목은 하지 않으면 해당 기능이 동작하지 않습니다.
@@ -20,14 +21,14 @@
 
 | # | 작업 | 구분 | 관련 |
 |---|---|---|---|
-| 1 | EC2 · 보안 그룹 · Elastic IP 준비 | ⛔ 차단 | 1장 |
+| 1 | EC2 · 보안 그룹 준비 (탄력적 IP 없음) | ⛔ 차단 | 1장 |
 | 2 | **스왑 2GB** | ⛔ **필수** (2GB RAM) | 2장 |
 | 3 | Docker Engine · compose 플러그인 설치 (apt) | ⛔ 차단 | 3장 |
 | 4 | `.env` prod 값 (**`DOCKER_GID`**, `APP_ENV`, `DOMAIN`, `REPORT_BASE_URL`) | ⛔ 차단 | A장 |
-| 5 | `docker-compose.prod.yml` 작성: Nginx(80/443) + certbot, 내부 포트 비공개 | ⛔ 차단 (작성 필요) | 4장 |
-| 6 | Nginx prod 설정: HTTPS, Zabbix Web 프록시, `/reports/` (Basic Auth) | ⛔ 차단 (작성 필요) | 5장 |
+| 5 | `docker-compose.prod.yml`: Nginx(80/443) + certbot + duckdns, 내부 포트 비공개 | ⛔ 차단 (작성 완료) | 4장 |
+| 6 | Nginx prod 설정: HTTPS, Zabbix Web 프록시, `/reports/` (Basic Auth) | ⛔ 차단 (작성 완료) | 5장 |
 | 7 | certbot 최초 발급 + 자동 갱신 | ⛔ 차단 | 6장 |
-| 8 | DuckDNS가 Elastic IP를 가리키게 설정 | ⛔ 차단 | 7장 |
+| 8 | DuckDNS 자동 갱신 (탄력적 IP 대체) | ⛔ 차단 | 7장 |
 | 9 | Zabbix 초기화: Admin 비밀번호 변경 → `zabbix_config.py import` | ⛔ 차단 | 8장 |
 | 10 | 배포 중 오탐 방지 (maintenance 모드) | 권장 | 9장, troubleshooting #8 |
 | 11 | 디스크 지표 수집 (호스트 `/` 읽기 전용 마운트) | 권장 | B장 |
@@ -85,10 +86,10 @@
 | socket-proxy | 32M | 12M | 32M | 12M | |
 | pitwall_web / api | 64M / 32M | 18M / 18M | **32M / 32M** | 16M / 18M | |
 | **합계** | **1.63G** | | **976M** | 실사용 347M | |
-| (예정) Nginx + certbot | | | +약 96M | | prod 추가분 → **총 약 1.07G** |
+| Nginx + certbot + duckdns | | | +112M (32/64/16) | | prod 추가분 → **총 약 1.09G** |
 
 - **OOM kill 0건**(`memory.events`). 웹 요청 300/300, API 100/100이 모두 200이었고, 장애 시나리오와 보고서도 정상 동작했습니다(2026-09-19, 로컬).
-- **OS 몫**: 2GB에서 상한 합계 1.07G를 빼면 약 0.9GB가 남습니다. Ubuntu, Docker Engine, containerd, 페이지 캐시가 이 안에서 씁니다.
+- **OS 몫**: 2GB에서 상한 합계 1.09G를 빼면 약 0.9GB가 남습니다. Ubuntu, Docker Engine, containerd, 페이지 캐시가 이 안에서 씁니다.
 - **스왑 2GB는 필수입니다.** 상한 합계가 RAM에 들어가더라도 다음 상황에서 순간 초과가 날 수 있습니다.
   - 이미지 빌드(`docker compose build`)
   - postgres의 housekeeper 대량 삭제
@@ -142,13 +143,18 @@
 - 아웃바운드는 기본값(전체 허용)으로 둡니다. OpenAI, Slack, DuckDNS, Let's Encrypt, Docker Hub, PyPI에 접속해야 합니다.
 - 내부 포트(8080, 10051 등)는 열지 않습니다.
 
-**Elastic IP**
-- 할당 후 인스턴스에 연결합니다. 중지·시작할 때 IP가 바뀌면 DuckDNS와 인증서가 틀어지기 때문입니다.
-- 퍼블릭 IPv4 주소에는 시간당 요금이 있습니다. 발표가 끝나면 Elastic IP를 해제하세요.
+**퍼블릭 IP (탄력적 IP 없음)**
+- 부여된 IAM 권한으로는 탄력적 IP를 할당할 수 없어 **자동 할당 퍼블릭 IP**를 씁니다.
+- 인스턴스를 **중지·시작하면 IP가 바뀝니다**(재부팅은 유지). 그래서 도메인이 IP를 따라오도록 **`duckdns` 컨테이너가 5분마다 갱신**합니다(7장).
+- 인증서는 도메인에 발급되므로 IP가 바뀌어도 그대로 유효합니다. DNS만 따라가면 됩니다.
+- **보안 그룹의 SSH(22) 소스(내 IP)** 는 내 쪽 IP가 바뀔 때 직접 고쳐야 합니다.
+
+**태그 정책(학원 계정)**: `username`/`group` 태그는 시스템이 자동으로 붙입니다. 사용자가 직접 붙이면 거부되고, 새 보안 그룹은 태그가 자동으로 붙은 뒤에야 규칙을 추가할 수 있습니다.
 
 **접속**: 기본 사용자가 **`ubuntu`**입니다(Amazon Linux의 `ec2-user`가 아님).
 ```bash
-ssh -i ~/.ssh/sys-aims.pem ubuntu@<Elastic IP>
+ssh -i ~/.ssh/sys-aims-09.pem ubuntu@<퍼블릭 IP>      # 최초 (DNS 갱신 전)
+ssh -i ~/.ssh/sys-aims-09.pem ubuntu@sys-aims.duckdns.org   # DuckDNS 갱신 후
 ```
 
 ## 2. 스왑 2GB (필수)
@@ -205,7 +211,7 @@ docker version && docker compose version
 | `APP_ENV` | `local` | `prod` | — |
 | `DOMAIN` | `localhost` | `sys-aims.duckdns.org` | 인증서·링크 오류 |
 | `REPORT_BASE_URL` | (비움) | `https://sys-aims.duckdns.org/reports` | Slack에 보고서 링크 대신 파일명만 표시 |
-| `ZABBIX_API_URL` | `http://localhost:8080/...` | prod에서 Zabbix Web 접근 방식에 맞춤 (4장) | 설정 스크립트 접속 실패 |
+| `ZABBIX_API_URL` | `http://localhost:8080/...` | `http://127.0.0.1:8080/api_jsonrpc.php` (루프백 바인딩, 4장) | 설정 스크립트 접속 실패 |
 
 ### `DOCKER_GID`: 맥에서는 드러나지 않는 차이
 | | 소켓 소유자 | 권한 | `.env`의 `DOCKER_GID` |
@@ -237,17 +243,32 @@ level=ERROR msg="socket not available" error="dial unix /var/run/docker.sock: co
 | `DOCKER_GID` | 아키텍처가 아니라 **OS/패키지**에 따라 달라짐 (A장) |
 | Docker API 버전 | healer는 `/v1.44`로 고정. docker-ce 최신은 이를 지원(로컬 29.x의 지원 범위 1.40~1.56) |
 
-## 4. `docker-compose.prod.yml` (작성 필요)
-- **Nginx** 추가: 80, 443 공개. `reports_data:/srv/reports:ro`, `./nginx/snippets`, `./nginx/conf.d/prod`, `./nginx/auth`(htpasswd), 인증서 볼륨. 메모리 상한 **32M**.
-- **certbot** 추가: webroot 방식, 12시간마다 `certbot renew`. 메모리 상한 **64M**.
-- **내부 포트 비공개**: local override의 8080(Zabbix Web), 8081(pitwall)은 prod에서 호스트에 열지 않습니다.
-  - Zabbix Web은 Nginx를 거쳐 HTTPS로만 접근합니다. 공개 범위(교수님 열람 필요 여부)는 결정이 필요합니다.
-  - 설정 스크립트용으로 `127.0.0.1:8080` 바인딩만 유지하거나, SSH 터널을 씁니다.
-- Nginx와 zabbix-web이 통신할 공용 네트워크(예: `zbx_front`)를 추가합니다.
+## 4. `docker-compose.prod.yml` (작성 완료)
+base와 함께 씁니다. 두 파일을 매번 나열하므로 셸 별칭을 하나 두면 편합니다.
+```bash
+alias dc='docker compose -f docker-compose.yml -f docker-compose.prod.yml'
+```
 
-## 5. Nginx prod 설정 (작성 필요)
-- `:80`: `/.well-known/acme-challenge/`(certbot webroot), 나머지는 301로 HTTPS 리다이렉트
-- `:443`: 인증서, 보안 헤더(HSTS 등), `location /` → zabbix-web:8080 프록시, `include snippets/reports.conf;`
+| 서비스 | 추가 내용 | 상한 |
+|---|---|---|
+| `nginx` | 유일한 공개 진입점(80/443). `reports_data:/srv/reports:ro`, `nginx/snippets`, `nginx/conf.d/prod`, `nginx/auth`(htpasswd), 인증서 볼륨을 마운트. 6시간마다 스스로 `nginx -s reload` (인증서 갱신 반영) | 32M |
+| `certbot` | webroot 방식, 12시간마다 `certbot renew` | 64M |
+| `duckdns` | 5분마다 퍼블릭 IP 갱신 (탄력적 IP 대체, 7장) | 16M |
+| `zabbix-web` | `127.0.0.1:8080`에만 바인딩. 호스트에서 `scripts/zabbix_config.py`가 API를 부르는 통로이며 외부에서는 닿지 않습니다 | (base와 동일) |
+
+- `pitwall_web`/`pitwall_api`는 호스트에 포트를 열지 않습니다. 감시는 컨테이너 망 안에서 이뤄집니다.
+- `zbx_front` 망을 추가해 nginx ↔ zabbix-web을 잇습니다. **`internal: true`로 두지 않습니다** — internal 망은 외부에서 들어오는 공개 포트(80/443) 트래픽까지 막습니다.
+
+## 5. Nginx prod 설정 (작성 완료)
+
+| 파일 | 역할 |
+|---|---|
+| `nginx/conf.d/prod/00-acme.conf` | `:80` — ACME 챌린지 + HTTPS 301 리다이렉트, 헬스체크 경로(`/nginx-health`). **인증서가 없어도 뜹니다** |
+| `nginx/conf.d/prod/10-https.conf.off` | `:443` — 인증서, HSTS, Zabbix Web 프록시, `include snippets/reports.conf`. **발급 후 `.off`를 떼어 활성화** |
+
+- 부트스트랩 순서를 지키려고 HTTPS 설정을 `.off`로 둡니다. 인증서 파일이 없는 상태로 `ssl_certificate`를 읽으면 nginx가 아예 기동하지 않기 때문입니다.
+- Zabbix Web 프록시는 `upstream` 대신 **변수 `proxy_pass` + Docker 내장 DNS(127.0.0.11)** 를 씁니다. 이름을 기동 시 한 번만 해석하면 재배포로 컨테이너 IP가 바뀐 뒤 502가 계속 납니다.
+- 공개 범위를 좁히려면 `10-https.conf.off`의 `allow`/`deny` 주석을 풉니다(기본값: HTTPS + Zabbix 로그인으로만 보호).
 
 **Basic Auth 파일 생성** (EC2, gitignore 대상)
 ```bash
@@ -256,14 +277,29 @@ printf 'professor:%s\n' "$(openssl passwd -apr1)" > nginx/auth/reports.htpasswd 
 ```
 
 ## 6. certbot
-- 최초 발급: Nginx를 80만 연 상태로 띄우고 webroot로 발급합니다. 그다음 443 설정을 켭니다.
-- 자동 갱신: certbot 컨테이너 루프 + 갱신 후 Nginx reload
-
-## 7. DuckDNS
+**최초 발급 (1회, 수동)** — DuckDNS가 현재 IP를 가리키고 80이 열린 뒤에 실행합니다.
 ```bash
-curl "https://www.duckdns.org/update?domains=${DUCKDNS_DOMAIN}&token=${DUCKDNS_TOKEN}&ip=<Elastic IP>"   # 응답 OK
+dc run --rm --entrypoint certbot certbot certonly \
+  --webroot -w /var/www/certbot -d sys-aims.duckdns.org \
+  --email <메일주소> --agree-tos --no-eff-email
+cp nginx/conf.d/prod/10-https.conf.off nginx/conf.d/prod/10-https.conf
+dc exec nginx nginx -t && dc exec nginx nginx -s reload
 ```
-- Elastic IP면 최초 1회로 충분합니다. 토큰은 `.env`에서 읽고 셸 기록이나 로그에 남기지 않도록 주의합니다.
+- `--entrypoint certbot`이 필요합니다. 서비스의 기본 entrypoint가 갱신 루프(`sh -c`)로 덮여 있기 때문입니다.
+- 실패를 반복하면 Let's Encrypt 요청 한도에 걸립니다. 발급 전에 `curl http://sys-aims.duckdns.org/.well-known/acme-challenge/ping`으로 경로가 열렸는지 먼저 확인하세요.
+
+**자동 갱신**: `certbot` 컨테이너가 12시간마다 `renew`를 시도하고(만료 30일 전부터 실제 갱신), `nginx`가 6시간마다 reload해 새 인증서를 집습니다.
+
+## 7. DuckDNS (탄력적 IP 대체)
+`duckdns` 컨테이너가 5분마다 갱신합니다. `ip=`를 **비워서** 보내면 DuckDNS가 요청의 출발지 IP를 쓰므로, 바뀐 퍼블릭 IP를 직접 알아낼 필요가 없습니다.
+
+```bash
+dc logs --tail 5 duckdns          # "duckdns sys-aims: OK"
+dig +short sys-aims.duckdns.org   # 현재 퍼블릭 IP와 일치
+```
+- 인스턴스를 중지·시작하면 최대 5분 + DNS TTL(60초) 안에 도메인이 새 IP를 가리킵니다.
+- 토큰은 `.env`에서만 읽고 로그에는 응답(OK/KO)만 남깁니다. 셸에서 직접 호출할 때는 히스토리에 토큰이 남지 않도록 주의하세요.
+- 주기는 `.env`의 `DUCKDNS_INTERVAL_SECONDS`(기본 300)로 조절합니다.
 
 ## 8. Zabbix 초기화
 1. `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build --wait`
@@ -291,6 +327,19 @@ curl "https://www.duckdns.org/update?domains=${DUCKDNS_DOMAIN}&token=${DUCKDNS_T
   3. 보고서 수집 키(`collect.py`의 `disk`)를 교체합니다.
 - **확인**: `docker exec zabbix-agent zabbix_agent2 -t 'vfs.fs.size[/hostfs,pused]'`
 
+## D. 다음 단계(감시 대상 VM 분리)를 막지 않기 위해 지금 해 둔 것
+
+감시 대상을 같은 서버의 컨테이너가 아니라 **별도 EC2 2대(VM-A = 계열사 A, VM-B = 계열사 B)** 로 옮기는 변경이 예정되어 있습니다. 이번 배포에서는 구현하지 않지만, 나중에 되돌릴 일이 없도록 아래만 맞춰 두었습니다.
+
+| 예정 변경 | 이번 배포에서 해 둔 것 | 그때 추가로 할 일 |
+|---|---|---|
+| VM-A/B의 Zabbix Agent가 이 서버로 접속 | `docker-compose.prod.yml`에 `zabbix-server`의 `10051` 공개 블록을 **주석으로** 남겨 둠 | 주석 해제 + 보안 그룹에 **VPC 내부 CIDR로만** 10051 허용 (0.0.0.0/0 금지) |
+| 계열사별 호스트 그룹·권한·알림 | 호스트·그룹·Action을 전부 `scripts/zabbix_config.py`(API)로 관리. 웹 UI 수동 설정이 없어 그룹을 늘려도 코드 한 곳만 바뀜 | `HOST_GROUP` 상수를 계열사별 그룹으로 확장, 장애에 `company` 태그 추가 |
+| 계열사별 AI 정책(사용 여부·한도·마스킹) | 한도와 키를 `.env`로만 주입(`RCA_MAX_PER_DAY`, `REPORT_MAX_PER_DAY`). 코드에 상수로 박아두지 않음 | 계열사별 정책 파일/테이블로 분리 |
+| 외부 AI 전송 데이터 보호 | `automation/rca/compress.py`의 `redact()`가 단일 경로에서 마스킹을 담당. 전송 기록은 `automation_data` 볼륨(`rca.jsonl`)에 영속 | IP·이메일·전화·주민번호·카드번호·내부 서버명 패턴 추가, 전송 본문 감사 기록 |
+
+- 공개 진입점은 nginx 하나이고 도메인도 하나입니다. 계열사별 화면을 나눠야 하면 서브도메인 대신 **Zabbix 권한(사용자 그룹)으로 분리**하는 편이 인증서를 늘리지 않아 간단합니다.
+
 ## C. 이전 후 검증
 
 | 항목 | 명령 | 기대 |
@@ -302,6 +351,7 @@ curl "https://www.duckdns.org/update?domains=${DUCKDNS_DOMAIN}&token=${DUCKDNS_T
 | **메모리** | 각 컨테이너 `cat /sys/fs/cgroup/memory.peak`, `memory.events`의 `oom_kill` | 상한 이하, **oom_kill 0** |
 | 호스트 여유 | `free -h`, `vmstat 5 3` | 스왑 사용이 지속 증가하지 않음 |
 | HTTPS | `curl -I https://sys-aims.duckdns.org` | 유효한 인증서 |
+| DNS 갱신 | `dig +short sys-aims.duckdns.org` | 현재 퍼블릭 IP와 일치 |
 | 보고서 인증 | `/reports/` 인증 없이 / 있이 | 401 / 200 |
 | 자동 복구 측정 | `python3 scripts/measure_detection.py --mode heal --trials 5` | 로컬(평균 24.8초)과 비교 |
 | 장애 시나리오 | `python3 scripts/chaos.py dependency --watch` → `restore` | 분류 `dependency` |

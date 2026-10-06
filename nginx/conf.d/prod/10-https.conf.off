@@ -1,0 +1,55 @@
+# =============================================================
+# :443 — 공개 서비스 (Zabbix Web + /reports/)
+#
+# 이 파일은 .off 확장자라 nginx가 읽지 않는다. 인증서를 발급한 뒤 활성화한다:
+#   cp nginx/conf.d/prod/10-https.conf.off nginx/conf.d/prod/10-https.conf
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec nginx nginx -t
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec nginx nginx -s reload
+#
+# 인증서가 없는 상태로 활성화하면 nginx가 기동에 실패한다 (발급 후에만 복사할 것).
+# 도메인을 바꾸면 server_name 1곳 + 인증서 경로 2곳을 함께 고친다.
+# =============================================================
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name sys-aims.duckdns.org;
+
+    ssl_certificate     /etc/letsencrypt/live/sys-aims.duckdns.org/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/sys-aims.duckdns.org/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    # 2GB 인스턴스: 세션 캐시를 작게 (1MB ≒ 4000세션)
+    ssl_session_cache shared:SSL:2m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header Referrer-Policy "same-origin" always;
+
+    # Zabbix 템플릿/설정 import 업로드 여유
+    client_max_body_size 8m;
+
+    # AI 일일 점검 보고서 (Basic Auth). 정의는 nginx/snippets/reports.conf
+    include /etc/nginx/snippets/reports.conf;
+
+    # Docker 내장 DNS. upstream 블록 대신 변수 proxy_pass를 쓰는 이유:
+    # 컨테이너를 재생성하면 zabbix-web의 IP가 바뀌는데, 이름을 기동 시 한 번만
+    # 해석하면 재배포 후 502가 계속 난다. 변수로 쓰면 매 요청마다 다시 해석한다.
+    resolver 127.0.0.11 valid=10s ipv6=off;
+
+    location / {
+        set $zbx_web http://zabbix-web:8080;
+        proxy_pass $zbx_web$request_uri;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 60s;
+
+        # 공개 범위를 좁히려면 (교수님 IP / 학교망만 열기) 아래 두 줄을 푼다.
+        # allow 203.0.113.0/24;
+        # deny all;
+    }
+}

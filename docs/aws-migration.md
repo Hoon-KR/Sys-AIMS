@@ -382,7 +382,7 @@ dig +short sys-aims.duckdns.org   # 현재 퍼블릭 IP와 일치
 
 | 예정 변경 | 이번 배포에서 해 둔 것 | 그때 추가로 할 일 |
 |---|---|---|
-| VM-A/B의 Zabbix Agent가 이 서버로 접속 | `docker-compose.prod.yml`에 `zabbix-server`의 `10051` 공개 블록을 **주석으로** 남겨 둠 | 주석 해제 + 보안 그룹에 **VPC 내부 CIDR로만** 10051 허용 (0.0.0.0/0 금지) |
+| VM-A/B의 Zabbix Agent가 이 서버로 접속 | **적용 완료** — `zabbix-server`가 `${ZABBIX_SERVER_BIND:-127.0.0.1}:10051`에 바인딩. 값을 비우면 루프백이라 실수로 공개되지 않음 | `.env`의 `ZABBIX_SERVER_BIND`에 mon 사설 IP를 넣고, 보안 그룹은 CIDR이 아니라 **VM의 SG를 소스로 참조** (VPC 전체를 여는 것보다 좁음) |
 | 계열사별 호스트 그룹·권한·알림 | 호스트·그룹·Action을 전부 `scripts/zabbix_config.py`(API)로 관리. 웹 UI 수동 설정이 없어 그룹을 늘려도 코드 한 곳만 바뀜 | `HOST_GROUP` 상수를 계열사별 그룹으로 확장, 장애에 `company` 태그 추가 |
 | 계열사별 AI 정책(사용 여부·한도·마스킹) | 한도와 키를 `.env`로만 주입(`RCA_MAX_PER_DAY`, `REPORT_MAX_PER_DAY`). 코드에 상수로 박아두지 않음 | 계열사별 정책 파일/테이블로 분리 |
 | 외부 AI 전송 데이터 보호 | `automation/rca/compress.py`의 `redact()`가 단일 경로에서 마스킹을 담당. 전송 기록은 `automation_data` 볼륨(`rca.jsonl`)에 영속 | IP·이메일·전화·주민번호·카드번호·내부 서버명 패턴 추가, 전송 본문 감사 기록 |

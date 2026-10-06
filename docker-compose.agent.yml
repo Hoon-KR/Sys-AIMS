@@ -65,6 +65,13 @@ services:
 
   # -----------------------------------------------------------
   # pitwall_api — 의존 서비스. 자동 복구 대상이 아니다 (socket-proxy 허용 목록 밖).
+  #
+  # 포트를 여는 이유: mon 의 Zabbix 가 **pitwall_api 를 독립적으로** 확인해야
+  # "의존 서비스만 죽었다"와 "웹까지 죽었다"를 구분할 수 있다. pitwall_web 을
+  # 경유하는 경로(/healthz)는 web 이 죽으면 함께 실패해 구분이 불가능하다.
+  # mon 은 컨테이너 망 안에서 직접 보지만, VM 에는 Zabbix 서버가 없고
+  # 에이전트는 network_mode: host 라 svc 브리지 망에 닿지 못한다.
+  # 사설 IP + 보안 그룹(mon SG) 으로만 제한한다.
   # -----------------------------------------------------------
   pitwall_api:
     image: nginx:1.30.5-alpine3.24
@@ -72,6 +79,8 @@ services:
     restart: unless-stopped
     environment:
       TZ: ${TZ:?TZ is required}
+    ports:
+      - "${VM_PRIVATE_IP:?VM_PRIVATE_IP is required}:${PITWALL_API_PORT:-8081}:80"
     volumes:
       - ./services/pitwall_api/html:/usr/share/nginx/html:ro
     networks:

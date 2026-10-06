@@ -42,6 +42,9 @@ LINUX_TEMPLATE_ACTIVE = "Linux by Zabbix agent active"
 # 그룹을 옮겨도 이력은 유지되지만, 바꿀 이유가 없는 변경은 하지 않는다.
 COMPANY_GROUPS = {"A": "Sys-AIMS/A", "B": "Sys-AIMS/B"}
 COMPANY_INTERNAL = "internal"           # healer 의 DEFAULT_COMPANY 와 같은 값
+# VM 의 pitwall_api 공개 포트. docker-compose.agent.yml 의 PITWALL_API_PORT 와 같아야 한다.
+# pitwall_web(:80) 경유로는 "의존 서비스만 죽었다"를 구분할 수 없어 독립 포트를 쓴다.
+VM_API_PORT = 8081
 DEFAULT_SERVER_HOST = "Zabbix server"
 
 # ---------------------------------------------------------------
@@ -202,7 +205,7 @@ def vm_hosts(env):
                 "templates": [HTTP_TEMPLATE],
                 "interfaces": [],
                 "tags": [{"tag": "role", "value": "dependency"}, {"tag": "company", "value": company}],
-                "macros": [{"macro": "{$SERVICE.URL}", "value": f"http://{ip}/status.json"},
+                "macros": [{"macro": "{$SERVICE.URL}", "value": f"http://{ip}:{VM_API_PORT}/status.json"},
                            # 의존 서비스 장애는 사람이 판단한다 (healer 허용 목록 밖)
                            {"macro": "{$HEALING.MODE}", "value": "off"}],
             },

@@ -376,14 +376,17 @@ def ensure_host(api, spec):
     found = api.call("host.get", {"filter": {"host": [spec["host"]]}, "output": ["hostid"], "selectInterfaces": ["interfaceid"]})
     groupid = ensure_group(api, "hostgroup", spec.get("group", HOST_GROUP))
     params = {"groups": [{"groupid": groupid}], "templates": templates, "tags": spec["tags"], "macros": spec["macros"]}
+    # 템플릿 연결은 아이템을 대량 생성한다. 'Linux by Zabbix agent active' 는 약 150개라
+    # 기본 15초를 넘길 수 있다 (troubleshooting #9 와 같은 원인) → 호스트 쓰기에만 120초를 준다.
     if found:
         hostid = found[0]["hostid"]
         if spec["interfaces"] and not found[0]["interfaces"]:
             params["interfaces"] = spec["interfaces"]
-        api.call("host.update", {"hostid": hostid, **params})
+        api.call("host.update", {"hostid": hostid, **params}, timeout=120)
         return hostid
     log(f"create host '{spec['host']}'")
-    return api.call("host.create", {"host": spec["host"], "interfaces": spec["interfaces"], **params})["hostids"][0]
+    return api.call("host.create", {"host": spec["host"], "interfaces": spec["interfaces"], **params},
+                    timeout=120)["hostids"][0]
 
 
 def fix_default_server_host(api):

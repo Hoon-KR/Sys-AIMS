@@ -112,9 +112,19 @@ def resolve_target(request):
     """요청의 (company, container) 로 대상을 찾는다. 목록에 없으면 None (→ 403).
 
     프록시가 이미 컨테이너를 제한하지만, 여기서도 조합을 확인한다 (심층 방어).
+
+    company 가 없는 요청은 **대상이 하나뿐일 때만** 받는다. 대상이 여럿인데
+    company 를 추측하면, 태그가 빠진 VM 호스트의 장애로 **감시 서버 자신의**
+    컨테이너를 재기동할 수 있다. 엉뚱한 서버를 건드리는 것이 최악이므로
+    모르면 거부한다 (fail closed).
     """
-    company = (request.get("company") or DEFAULT_COMPANY).strip()
+    company = (request.get("company") or "").strip()
     container = (request.get("container") or "").strip()
+    if not company:
+        if len(TARGETS) != 1:
+            return None
+        only = next(iter(TARGETS.values()))
+        return only if only["container"] == container else None
     return TARGETS.get(f"{company}/{container}")
 
 
@@ -274,16 +284,17 @@ def handoff_to_rca(job):
 # ---------------------------------------------------------------- heal
 def heal(request):
     target = resolve_target(request)
-    ctx = {"company": (request.get("company") or DEFAULT_COMPANY).strip(),
+    ctx = {"company": (request.get("company") or "").strip() or None,
            "container": request.get("container", ""),
            "event_id": request.get("event_id"), "host": request.get("host")}
 
     if target is None:
         log("heal.rejected", reason="target not allowed", **ctx)
         return 403, {"result": "rejected",
-                     "reason": f"target '{ctx['company']}/{ctx['container']}' is not allowed"}
+                     "reason": f"target '{ctx['company'] or '(no company tag)'}/{ctx['container']}' is not allowed"}
 
     key = target_key(target)
+    ctx["company"] = target["company"]
     ctx["proxy"] = f"{target['proxy_host']}:{target['proxy_port']}"
 
     with _lock:

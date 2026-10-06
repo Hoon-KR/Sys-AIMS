@@ -30,10 +30,18 @@ MEDIATYPES_FILE = EXPORT_DIR / "mediatypes.yaml"
 AUTOMATION_FILE = EXPORT_DIR / "automation.json"
 MEDIATYPE_SCRIPTS = REPO_ROOT / "zabbix" / "mediatypes"
 
-HOST_GROUP = "Sys-AIMS"
+HOST_GROUP = "Sys-AIMS"                 # 감시 서버(mon) 자신의 호스트. **이름을 바꾸지 않는다**
 TEMPLATE_GROUP = "Templates/Sys-AIMS"
 HTTP_TEMPLATE = "Sys-AIMS HTTP Service"
 LINUX_TEMPLATE = "Linux by Zabbix agent"
+# VM 의 에이전트는 **액티브 전용**이다(보안 그룹에 10050 을 열지 않음).
+# 패시브 템플릿을 붙이면 Zabbix 가 10050 을 찔러 보고 실패해서
+# "Zabbix agent is not available" 가 영구히 떠 있는다 → 액티브 템플릿을 쓴다.
+LINUX_TEMPLATE_ACTIVE = "Linux by Zabbix agent active"
+# 계열사별 호스트 그룹. mon 의 호스트는 기존 그룹(HOST_GROUP)에 그대로 둔다 —
+# 그룹을 옮겨도 이력은 유지되지만, 바꿀 이유가 없는 변경은 하지 않는다.
+COMPANY_GROUPS = {"A": "Sys-AIMS/A", "B": "Sys-AIMS/B"}
+COMPANY_INTERNAL = "internal"           # healer 의 DEFAULT_COMPANY 와 같은 값
 DEFAULT_SERVER_HOST = "Zabbix server"
 
 # ---------------------------------------------------------------
@@ -95,26 +103,30 @@ HTTP_TRIGGER = {
 HOSTS = [
     {
         "host": "zabbix-agent",  # compose의 ZBX_HOSTNAME과 일치해야 한다
+        "group": HOST_GROUP,
         "templates": [LINUX_TEMPLATE],
         # IP가 아닌 DNS 이름으로 연결 (컨테이너 재생성 시 IP가 바뀔 수 있음)
         "interfaces": [{"type": 1, "main": 1, "useip": 0, "ip": "", "dns": "zabbix-agent", "port": "10050"}],
-        "tags": [{"tag": "role", "value": "host-os"}],
+        "tags": [{"tag": "role", "value": "host-os"}, {"tag": "company", "value": COMPANY_INTERNAL}],
         "macros": [],
     },
     {
         "host": "pitwall_web",
+        "group": HOST_GROUP,
         "templates": [HTTP_TEMPLATE],
         "interfaces": [],  # HTTP agent는 인터페이스가 필요 없다
         # 이벤트에 전파되어 healer가 재기동할 컨테이너를 식별하는 데 쓴다
-        "tags": [{"tag": "container", "value": "pitwall_web"}],
+        "tags": [{"tag": "container", "value": "pitwall_web"},
+                 {"tag": "company", "value": COMPANY_INTERNAL}],
         # 딥 헬스체크: 의존 서비스(pitwall_api)까지 응답해야 200 (docs/chaos-scenarios.md)
         "macros": [{"macro": "{$SERVICE.URL}", "value": "http://pitwall_web/healthz"}],
     },
     {
         "host": "pitwall_api",
+        "group": HOST_GROUP,
         "templates": [HTTP_TEMPLATE],
         "interfaces": [],
-        "tags": [{"tag": "role", "value": "dependency"}],
+        "tags": [{"tag": "role", "value": "dependency"}, {"tag": "company", "value": COMPANY_INTERNAL}],
         "macros": [
             {"macro": "{$SERVICE.URL}", "value": "http://pitwall_api/status.json"},
             # 자동 복구 대상 아님 — 의존 서비스 장애는 사람이 판단한다 (healer 허용 목록 밖)
@@ -123,9 +135,10 @@ HOSTS = [
     },
     {
         "host": "healer",
+        "group": HOST_GROUP,
         "templates": [HTTP_TEMPLATE],
         "interfaces": [],
-        "tags": [{"tag": "role", "value": "automation"}],
+        "tags": [{"tag": "role", "value": "automation"}, {"tag": "company", "value": COMPANY_INTERNAL}],
         "macros": [
             {"macro": "{$SERVICE.URL}", "value": "http://healer:8080/health"},
             {"macro": "{$HEALING.MODE}", "value": "off"},  # healer는 자동 복구 대상이 아니다
@@ -133,15 +146,73 @@ HOSTS = [
     },
     {
         "host": "rca",
+        "group": HOST_GROUP,
         "templates": [HTTP_TEMPLATE],
         "interfaces": [],
-        "tags": [{"tag": "role", "value": "automation"}],
+        "tags": [{"tag": "role", "value": "automation"}, {"tag": "company", "value": COMPANY_INTERNAL}],
         "macros": [
             {"macro": "{$SERVICE.URL}", "value": "http://rca:8081/health"},
             {"macro": "{$HEALING.MODE}", "value": "off"},  # rca 장애는 사람이 본다 (복구 경로와 분리)
         ],
     },
 ]
+
+def vm_hosts(env):
+    """계열사 VM 호스트 (docs/adr/0002-remote-docker-access.md).
+
+    .env 에 사설 IP 가 있는 계열사만 등록한다 → VM 을 아직 안 만든 상태에서
+    apply/export 를 돌려도 깨지지 않는다 (VM 분리 전 구성 유지).
+
+    자동 복구는 **기본 off** 로 등록한다. Action 은 `healing=auto` 태그 조건으로만
+    발동하므로, off 인 동안에는 장애가 감지되어도 healer 호출과 RCA(비용)가 없다.
+    VM 연결을 눈으로 확인한 뒤 .env 의 HEALING_MODE_<회사> 를 auto 로 바꾼다.
+    """
+    specs = []
+    for company, group in COMPANY_GROUPS.items():
+        ip = env.get(f"VM_{company}_PRIVATE_IP", "").strip()
+        if not ip:
+            continue
+        mode = env.get(f"HEALING_MODE_{company}", "").strip() or "off"
+        slug = company.lower()
+        specs += [
+            {
+                # 호스트 OS 지표 — ZBX_HOSTNAME 과 **정확히** 같아야 액티브 체크가 붙는다
+                "host": f"vm-{slug}-os",
+                "group": group,
+                "templates": [LINUX_TEMPLATE_ACTIVE],
+                "interfaces": [],          # 액티브 전용: 인터페이스가 필요 없다
+                "tags": [{"tag": "role", "value": "host-os"}, {"tag": "company", "value": company}],
+                "macros": [{"macro": "{$HEALING.MODE}", "value": "off"}],   # OS 호스트는 복구 대상이 아니다
+            },
+            {
+                # 계열사 서비스 — 자동 복구 대상. container 태그로 healer 가 컨테이너를,
+                # company 태그로 어느 서버인지 식별한다 (둘 다 이벤트로 전파된다)
+                "host": f"{company}-pitwall_web",
+                "group": group,
+                "templates": [HTTP_TEMPLATE],
+                "interfaces": [],
+                "tags": [{"tag": "container", "value": "pitwall_web"},
+                         {"tag": "company", "value": company}],
+                "macros": [{"macro": "{$SERVICE.URL}", "value": f"http://{ip}/healthz"},
+                           {"macro": "{$HEALING.MODE}", "value": mode}],
+            },
+            {
+                "host": f"{company}-pitwall_api",
+                "group": group,
+                "templates": [HTTP_TEMPLATE],
+                "interfaces": [],
+                "tags": [{"tag": "role", "value": "dependency"}, {"tag": "company", "value": company}],
+                "macros": [{"macro": "{$SERVICE.URL}", "value": f"http://{ip}/status.json"},
+                           # 의존 서비스 장애는 사람이 판단한다 (healer 허용 목록 밖)
+                           {"macro": "{$HEALING.MODE}", "value": "off"}],
+            },
+        ]
+    return specs
+
+
+def all_hosts(env):
+    return HOSTS + vm_hosts(env)
+
 
 # ---------------------------------------------------------------
 # Self-Healing: Media type / 전용 사용자 / Action
@@ -170,6 +241,8 @@ MEDIA_TYPES = [
             {"name": "url", "value": "http://healer:8080/heal"},
             {"name": "token", "value": "{$HEALER.TOKEN}"},
             {"name": "container", "value": "{EVENT.TAGS.container}"},
+            # 어느 계열사(서버)의 컨테이너인지. healer 가 이 값으로 socket-proxy 를 고른다.
+            {"name": "company", "value": "{EVENT.TAGS.company}"},
             {"name": "event_id", "value": "{EVENT.ID}"},
             {"name": "host", "value": "{HOST.HOST}"},
             {"name": "trigger", "value": "{EVENT.NAME}"},
@@ -217,7 +290,8 @@ REPORT_USERGROUP = "Sys-AIMS Read-only"
 REPORT_API_METHODS = ["event.get", "history.get", "host.get", "item.get", "problem.get", "trend.get", "user.logout"]  # logout: 세션 누적 방지
 REPORT_ACCESS = {
     "role": {"name": REPORT_ROLE, "type": "1", "api_mode": "1", "api": REPORT_API_METHODS},
-    "usergroup": {"name": REPORT_USERGROUP, "gui_access": "3", "hostgroup_rights": [{"hostgroup": HOST_GROUP, "permission": "2"}]},
+    "usergroup": {"name": REPORT_USERGROUP, "gui_access": "3", "hostgroup_rights": [{"hostgroup": g, "permission": "2"}
+                                            for g in [HOST_GROUP, *COMPANY_GROUPS.values()]]},
     "user": {"username_env": "ZABBIX_REPORT_USER", "role": REPORT_ROLE, "usergroups": [REPORT_USERGROUP]},
 }
 
@@ -297,9 +371,10 @@ def ensure_http_template(api):
     return tid
 
 
-def ensure_host(api, spec, groupid):
+def ensure_host(api, spec):
     templates = [{"templateid": template_id(api, name)} for name in spec["templates"]]
     found = api.call("host.get", {"filter": {"host": [spec["host"]]}, "output": ["hostid"], "selectInterfaces": ["interfaceid"]})
+    groupid = ensure_group(api, "hostgroup", spec.get("group", HOST_GROUP))
     params = {"groups": [{"groupid": groupid}], "templates": templates, "tags": spec["tags"], "macros": spec["macros"]}
     if found:
         hostid = found[0]["hostid"]
@@ -507,9 +582,12 @@ def export_automation(api):
 
 def cmd_apply(api):
     ensure_http_template(api)
-    groupid = ensure_group(api, "hostgroup", HOST_GROUP)
-    for spec in HOSTS:
-        ensure_host(api, spec, groupid)
+    env = load_env()
+    # 그룹을 먼저 만든다: 보고서 계정 권한이 그룹 이름을 참조한다
+    for name in [HOST_GROUP, *COMPANY_GROUPS.values()]:
+        ensure_group(api, "hostgroup", name)
+    for spec in all_hosts(env):
+        ensure_host(api, spec)
     fix_default_server_host(api)
     ensure_global_secret_macros(api)
     ensure_media_types(api)
@@ -522,7 +600,7 @@ def cmd_export(api):
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
     tid = template_id(api, HTTP_TEMPLATE)
     TEMPLATE_FILE.write_text(api.call("configuration.export", {"format": "yaml", "options": {"templates": [tid]}}))
-    hosts = api.call("host.get", {"filter": {"host": [h["host"] for h in HOSTS]}, "output": ["hostid"]})
+    hosts = api.call("host.get", {"filter": {"host": [h["host"] for h in all_hosts(load_env())]}, "output": ["hostid"]})
     HOSTS_FILE.write_text(api.call("configuration.export", {"format": "yaml", "options": {"hosts": [h["hostid"] for h in hosts]}}))
     media = api.call("mediatype.get", {"filter": {"name": [m["name"] for m in MEDIA_TYPES]}, "output": ["mediatypeid"]})
     MEDIATYPES_FILE.write_text(api.call("configuration.export", {"format": "yaml", "options": {"mediaTypes": [m["mediatypeid"] for m in media]}}))

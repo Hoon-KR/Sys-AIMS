@@ -50,10 +50,20 @@ class TargetRegistryTest(unittest.TestCase):
 
     def test_resolve(self):
         self.assertEqual(healer.resolve_target({"company": "A", "container": "pitwall_web"})["company"], "A")
-        # company 생략 → internal (감시 서버 자신)
-        self.assertEqual(healer.resolve_target({"container": "pitwall_web"})["company"], "internal")
         self.assertIsNone(healer.resolve_target({"company": "C", "container": "pitwall_web"}))
         self.assertIsNone(healer.resolve_target({"company": "A", "container": "postgres"}))
+
+    def test_missing_company_is_rejected_when_multiple_targets(self):
+        """태그가 빠진 VM 호스트의 장애로 감시 서버의 컨테이너를 재기동하면 안 된다."""
+        self.assertIsNone(healer.resolve_target({"container": "pitwall_web"}))
+
+    def test_missing_company_allowed_only_with_single_target(self):
+        """VM 분리 전 구성(대상 1개)에서는 company 없는 예전 요청을 그대로 받는다."""
+        with mock.patch.dict(os.environ, {"HEAL_TARGETS": ""}):
+            single = healer.load_targets()
+        with mock.patch.object(healer, "TARGETS", single):
+            self.assertEqual(healer.resolve_target({"container": "pitwall_web"})["company"], "internal")
+            self.assertIsNone(healer.resolve_target({"container": "postgres"}))
 
 
 class StateMigrationTest(unittest.TestCase):

@@ -208,10 +208,12 @@ docker version && docker compose version
 | 키 | 로컬(맥) | **EC2 (Ubuntu)** | 틀리면 |
 |---|---|---|---|
 | `DOCKER_GID` | `0` | **`getent group docker \| cut -d: -f3`** | socket-proxy가 기동 직후 종료 → **Self-Healing 전체 불능** |
-| `APP_ENV` | `local` | `prod` | — |
-| `DOMAIN` | `localhost` | `sys-aims.duckdns.org` | 인증서·링크 오류 |
+| `APP_ENV` | `local` | `prod` | — (기록용. 읽는 코드 없음) |
+| `DOMAIN` | `localhost` | `sys-aims.duckdns.org` | — (기록용. 읽는 코드 없음) |
 | `REPORT_BASE_URL` | (비움) | `https://sys-aims.duckdns.org/reports` | Slack에 보고서 링크 대신 파일명만 표시 |
 | `ZABBIX_API_URL` | `http://localhost:8080/...` | `http://127.0.0.1:8080/api_jsonrpc.php` (루프백 바인딩, 4장) | 설정 스크립트 접속 실패 |
+
+**도메인을 바꿀 때 실제로 고쳐야 하는 곳**: `nginx/conf.d/prod/10-https.conf.off`(`server_name` 1곳 + 인증서 경로 2곳), `.env`의 `REPORT_BASE_URL`, `DUCKDNS_DOMAIN`. `DOMAIN`과 `APP_ENV`는 어떤 코드도 읽지 않으므로 바꿔도 동작에 영향이 없습니다.
 
 ### `DOCKER_GID`: 맥에서는 드러나지 않는 차이
 | | 소켓 소유자 | 권한 | `.env`의 `DOCKER_GID` |

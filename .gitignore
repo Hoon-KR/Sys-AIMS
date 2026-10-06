@@ -75,3 +75,6 @@ nginx/auth/
 # ---------- Nginx prod HTTPS 설정 (서버에서 활성화한 사본) ----------
 # 원본은 10-https.conf.off 로 커밋한다. 인증서 발급 뒤 서버에서 복사해 켠다.
 nginx/conf.d/prod/10-https.conf
+
+# ---------- 감시 대상 VM (docker-compose.agent.yml) ----------
+.env.agent

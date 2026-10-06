@@ -1,0 +1,177 @@
+# =============================================================
+# Sys-AIMS — 감시 대상 VM 스택 (계열사 A / B)
+#
+#   ssh sys-aims-vm-a
+#   cd ~/sys-aims
+#   docker compose -f docker-compose.agent.yml up -d --wait
+#
+# 이 파일은 **단독**으로 쓴다 (docker-compose.yml 과 합치지 않는다).
+# 감시 서버(mon)의 스택과 역할이 다르기 때문이다:
+#   - 여기에는 Zabbix 서버/DB/AI 가 없다. 서비스와 에이전트, 재기동 통로만 있다.
+#   - 외부(인터넷) 노출이 전혀 없다. 모든 포트를 **사설 IP에만** 바인딩하고
+#     보안 그룹이 mon 의 SG 에서 오는 트래픽만 허용한다.
+#
+# 구성
+#   pitwall_web   계열사 서비스 (자동 복구 대상). :80 → 사설 IP 만
+#   pitwall_api   pitwall_web 의 의존 서비스 (호스트 포트 없음)
+#   zabbix-agent  액티브 체크로 mon:10051 에 접속 (인바운드 10050 불필요)
+#   socket-proxy  healer 가 pitwall_web 만 재기동할 수 있는 통로. :2375 → 사설 IP 만
+#
+# 메모리 예산 (t3.small 2GB): 32 + 32 + 64 + 32 = 160M
+# =============================================================
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # -----------------------------------------------------------
+  # pitwall_web — 계열사 서비스. mon 의 Zabbix HTTP 체크가 사설 IP:80/healthz 를 본다.
+  # restart:"no" 는 base 와 같은 이유다: 복구 주체는 Docker 가 아니라
+  # Zabbix Action → healer 여야 하고, 그래야 자동 복구를 증명할 수 있다.
+  # -----------------------------------------------------------
+  pitwall_web:
+    image: nginx:1.30.5-alpine3.24
+    container_name: pitwall_web
+    restart: "no"
+    depends_on:
+      pitwall_api:
+        condition: service_healthy
+    environment:
+      TZ: ${TZ:?TZ is required}
+    ports:
+      # 0.0.0.0 금지. 사설 IP 에만 열어 보안 그룹 설정 실수까지 방어한다.
+      - "${VM_PRIVATE_IP:?VM_PRIVATE_IP is required}:80:80"
+    volumes:
+      - ./services/pitwall_web/html:/usr/share/nginx/html:ro
+      # 장애 시나리오 ②(잘못된 설정 배포)가 이 디렉터리에 주입한다
+      - ./services/pitwall_web/conf.d:/etc/nginx/conf.d:ro
+    networks:
+      - svc
+    healthcheck:
+      # 딥 헬스체크: 의존 서비스(pitwall_api)까지 응답해야 healthy
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: 32M
+    logging: *default-logging
+
+  # -----------------------------------------------------------
+  # pitwall_api — 의존 서비스. 자동 복구 대상이 아니다 (socket-proxy 허용 목록 밖).
+  # -----------------------------------------------------------
+  pitwall_api:
+    image: nginx:1.30.5-alpine3.24
+    container_name: pitwall_api
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:?TZ is required}
+    volumes:
+      - ./services/pitwall_api/html:/usr/share/nginx/html:ro
+    networks:
+      - svc
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/status.json"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: 32M
+    logging: *default-logging
+
+  # -----------------------------------------------------------
+  # zabbix-agent — **액티브 체크 전용**
+  #   ZBX_PASSIVE_ALLOW=false 면 엔트리포인트가 Server= 를 비운다 →
+  #   패시브 체크를 받지 않으므로 보안 그룹에 10050 을 열 필요가 없다.
+  #   (이미지 /usr/bin/docker-entrypoint.sh 에서 확인: Server 는 ZBX_PASSIVESERVERS,
+  #    ServerActive 는 ZBX_ACTIVESERVERS 에서 오고 둘 다 ZBX_SERVER_HOST 가 채운다)
+  #
+  # 호스트 OS 지표를 제대로 걷기 위한 설정 (컨테이너 agent 의 한계 보완)
+  #   network_mode: host  → net.if.* 가 호스트 인터페이스를 본다. 액티브 접속도 호스트 망으로 나간다
+  #   pid: host           → proc.* / CPU / 메모리가 호스트 전체 기준이 된다
+  #   /:/hostfs:ro        → 디스크는 vfs.fs.size[/hostfs,...] 로 읽는다 (aws-migration.md 부록 B)
+  # 원격 명령은 명시적으로 막는다. 재기동은 agent 가 아니라 socket-proxy 경유만 허용한다.
+  # -----------------------------------------------------------
+  zabbix-agent:
+    image: zabbix/zabbix-agent2:alpine-7.0.30
+    container_name: zabbix-agent
+    restart: unless-stopped
+    network_mode: host
+    pid: host
+    environment:
+      ZBX_HOSTNAME: ${ZBX_HOSTNAME:?ZBX_HOSTNAME is required}        # Zabbix 호스트명과 일치해야 한다
+      ZBX_SERVER_HOST: ${MON_PRIVATE_IP:?MON_PRIVATE_IP is required}
+      ZBX_PASSIVE_ALLOW: "false"
+      ZBX_ACTIVE_ALLOW: "true"
+      # network_mode: host 라 10050 리스너가 호스트에 생긴다. 패시브를 쓰지 않으므로
+      # 루프백에만 묶어 둔다 (보안 그룹이 이미 막지만 한 겹 더).
+      ZBX_LISTENIP: "127.0.0.1"
+      ZBX_DENYKEY: "system.run[*]"
+      TZ: ${TZ:?TZ is required}
+    volumes:
+      - /:/hostfs:ro
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+    logging: *default-logging
+
+  # -----------------------------------------------------------
+  # socket-proxy — healer 가 이 VM 의 pitwall_web 만 재기동할 수 있는 통로
+  #
+  # ADR-0002: mon 의 healer 가 사설망으로 2375 에 접속한다. 완화 수단 3겹:
+  #   1) 보안 그룹: mon 의 SG 에서 오는 트래픽만 2375 허용
+  #   2) 포트 바인딩: 사설 IP 에만 (0.0.0.0 아님)
+  #   3) -allowfrom=<mon 사설 IP>/32  — 이 플래그는 IP/CIDR 을 받는다 (`-h` 로 확인)
+  #   4) 허용 목록: pitwall_web 의 json/logs 조회와 restart, 단 3개뿐
+  # 평문 HTTP 라는 점은 수용된 위험으로 ADR-0002 에 기록한다
+  # (1.13.1 에 TLS 옵션이 없다 — 업그레이드 경로는 WireGuard/stunnel 같은 외부 터널).
+  # -----------------------------------------------------------
+  socket-proxy:
+    image: wollomatic/socket-proxy:1.13.1
+    container_name: socket-proxy
+    restart: unless-stopped
+    command:
+      - "-loglevel=INFO"
+      - "-listenip=0.0.0.0"
+      - "-allowfrom=${MON_PRIVATE_IP:?MON_PRIVATE_IP is required}/32"
+      - "-allowGET=/v1\\.[0-9]+/containers/${TARGET_CONTAINER:?TARGET_CONTAINER is required}/(json|logs)"
+      - "-allowPOST=/v1\\.[0-9]+/containers/${TARGET_CONTAINER:?TARGET_CONTAINER is required}/restart"
+      - "-allowhealthcheck"
+      - "-watchdoginterval=30"
+      - "-stoponwatchdog"
+    # 이미지는 비root(65534)로 실행된다. 소켓(660)의 소유 그룹을 추가해야 접근 가능하다.
+    group_add:
+      - "${DOCKER_GID:?DOCKER_GID is required}"
+    ports:
+      - "${VM_PRIVATE_IP:?VM_PRIVATE_IP is required}:2375:2375"
+    volumes:
+      # :ro 는 소켓 파일 보호일 뿐 API 제한이 아니다. 제한은 위 허용 목록이 담당한다.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD", "/healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: 32M
+    logging: *default-logging
+
+networks:
+  # 서비스 망: pitwall_web ↔ pitwall_api. 외부 노출은 포트 바인딩이 담당한다.
+  svc:

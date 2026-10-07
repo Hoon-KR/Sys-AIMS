@@ -174,6 +174,43 @@ host.get → "Zabbix server" 의 interfaces: 127.0.0.1:10050, available=2 (연�
 
 ---
 
+## 11. 🔴 Action 조건이 맞는데 알림이 0건이었다 — 알림 계정의 호스트 권한
+
+- **발생**: 2026-10-07, 계열사 VM 분리 후 `A-pitwall_web` 의 첫 자동 복구 검증
+- **증상**: 아래가 모두 정상인데 **`alert.get` 이 0건**이고 healer 에 요청이 들어오지 않았습니다.
+  - 열린 문제 존재, 태그 `healing=auto` / `company=A` / `container=pitwall_web`
+  - Action `status=0`(enabled), 조건 `conditiontype=26`(이벤트 태그 값) `healing == auto`
+  - `sys-aims-bot` 활성(`users_status=0`), 미디어 2개 `active=0`, `severity=63`, 24/7
+  - 미디어 타입 둘 다 `status=0`, escalator/alerter 프로세스 정상
+  - **Zabbix 서버 로그에 아무 기록도 없음**
+- **원인**: **알림 대상 사용자는 이벤트가 발생한 호스트에 최소 읽기 권한이 있어야 합니다.**
+  `sys-aims-bot` 의 사용자 그룹(`Sys-AIMS Automation`)은 `Sys-AIMS` 에만 권한이 있었고,
+  새로 만든 계열사 호스트는 `Sys-AIMS/A` 에 있었습니다. `sys-aims-bot` 의 역할은
+  `User role` 이라 Super admin 처럼 권한을 우회하지 못합니다.
+  **Zabbix 는 이 거부를 로그에 남기지 않습니다.** 그래서 설정이 전부 맞는데도 조용히 아무 일도
+  일어나지 않습니다. 호스트 그룹은 **상위 그룹 권한이 하위(`Sys-AIMS/A`)로 자동 전파되지 않습니다.**
+- **왜 어제까지 괜찮았나**: mon 의 `pitwall_web` 은 `Sys-AIMS` 에 있어 권한 범위 안이었습니다.
+  계열사 그룹을 새로 만든 순간부터 그 그룹의 호스트만 알림이 끊겼습니다.
+- **해결**: 봇 사용자 그룹의 `hostgroup_rights` 를 계열사 그룹까지 확장했습니다
+  (`scripts/zabbix_config.py` 의 `AUTOMATION`). 보고서 읽기 전용 계정(`REPORT_ACCESS`)은 같은
+  변경을 이미 했는데 알림 계정을 빠뜨린 것이 원인이었습니다. **호스트 그룹을 추가할 때는
+  두 사용자 그룹을 함께 늘려야 합니다.**
+- **진단 순서**(같은 증상이 또 나오면): Action 조건보다 **권한을 먼저** 봅니다.
+  ```bash
+  python3 -c "
+  import sys; sys.path.insert(0,'automation')
+  from common.zabbix_api import ZabbixAPI
+  api = ZabbixAPI.from_env()
+  for name in ['Sys-AIMS Automation', 'Sys-AIMS Read-only']:
+      ug = api.call('usergroup.get', {'filter': {'name': name}, 'selectHostGroupRights': 'extend'})[0]
+      ids = [r['id'] for r in ug['hostgroup_rights']]
+      groups = api.call('hostgroup.get', {'groupids': ids, 'output': ['name']})
+      print(name, '→', sorted(g['name'] for g in groups))
+  api.logout()"
+  ```
+
+---
+
 ## 참고: 컨테이너 agent에서 not supported인 아이템
 
 `Linux by Zabbix agent`를 컨테이너 agent에 적용하면 일부 아이템이 not supported가 됩니다(로컬에서 154개 중 10개).

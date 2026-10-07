@@ -308,7 +308,13 @@ REPORT_ACCESS = {
 HOUSEKEEPING = {"hk_history_global": "1", "hk_history": "7d", "hk_trends_global": "1", "hk_trends": "90d"}
 
 AUTOMATION = {
-    "usergroup": {"name": BOT_USERGROUP, "gui_access": "3", "hostgroup_rights": [{"hostgroup": HOST_GROUP, "permission": "2"}]},
+    # ⚠️ 알림 대상 사용자는 **이벤트 호스트에 읽기 권한이 있어야** 한다.
+    # 권한이 없으면 Zabbix 는 알림을 만들지 않고 **로그도 남기지 않는다** —
+    # Action/미디어/트리거가 모두 정상인데 alert 가 0건인 상태가 된다
+    # (troubleshooting.md #11). 계열사 그룹을 추가할 때마다 여기도 함께 늘린다.
+    "usergroup": {"name": BOT_USERGROUP, "gui_access": "3",
+                  "hostgroup_rights": [{"hostgroup": g, "permission": "2"}
+                                       for g in [HOST_GROUP, *COMPANY_GROUPS.values()]]},
     "user": {"username": BOT_USER, "role": "User role", "usergroups": [BOT_USERGROUP],
              "medias": [{"mediatype": HEALER_MEDIA, "sendto": "healer"}, {"mediatype": SLACK_MEDIA, "sendto": "slack"}]},
     "action": {

@@ -1,10 +1,26 @@
 #!/usr/bin/env python3
 """장애 감지 / 자동 복구 시간 측정.
 
-  python3 scripts/measure_detection.py [--mode detect|heal] [--trials 5] [--container pitwall_web]
+감시 서버(mon) 자신:
+  python3 scripts/measure_detection.py --mode heal --trials 5
+
+계열사 VM (맥에서 docker context 경유, docs/adr/0002-remote-docker-access.md):
+  docker context create vm-a --docker host=ssh://sys-aims-vm-a
+  docker context create mon  --docker host=ssh://sys-aims-mon
+  python3 scripts/measure_detection.py --mode heal --trials 5 \
+      --host A-pitwall_web --container pitwall_web \
+      --target-context vm-a --mon-context mon
+
+  --host            Zabbix 호스트명 (기본: --container 와 같음)
+  --container       멈출 컨테이너 이름
+  --target-context  대상 컨테이너가 있는 호스트의 docker context
+  --mon-context     healer 가 있는 호스트의 docker context (서킷 초기화용)
 
   detect  docker stop → 감지 측정 → 스크립트가 docker start → 복구 확인 측정
   heal    docker stop 만 한다. 재기동은 Zabbix Action → healer 가 수행 (사람 개입 없음)
+
+mon 에 VM 접속 자격증명을 두지 않기 위해, VM 측정은 **맥에서** 돌린다.
+docker CLI 가 SSH 로 원격 Docker API 를 쓰고(ssh://), Zabbix API 는 SSH 터널로 붙는다.
 
 각 회차 공통:
   1) 정상 상태(최근 값 200, 열린 문제 없음) 확인
@@ -70,8 +86,24 @@ def wait_healthy(api, hostid):
     wait_for(healthy, "healthy baseline")
 
 
+# context 를 주면 그 호스트의 Docker API 를 쓴다 (ssh://). 비우면 로컬.
+_TARGET_CTX = None
+_MON_CTX = None
+
+
+def _docker(context, *args):
+    cmd = ["docker"] + (["--context", context] if context else []) + list(args)
+    return subprocess.run(cmd, check=True, capture_output=True, text=True).stdout.strip()
+
+
 def docker(*args):
-    return subprocess.run(["docker", *args], check=True, capture_output=True, text=True).stdout.strip()
+    """측정 대상 컨테이너가 있는 호스트 (mon 자신 또는 계열사 VM)."""
+    return _docker(_TARGET_CTX, *args)
+
+
+def docker_mon(*args):
+    """healer 가 있는 호스트. 서킷 초기화에만 쓴다."""
+    return _docker(_MON_CTX, *args)
 
 
 def container_started_at(name):
@@ -82,7 +114,7 @@ def container_started_at(name):
 
 def reset_healer_circuit():
     # 측정은 서킷 한도(10분 3회)를 넘으므로 회차마다 초기화한다. 토큰은 컨테이너 환경변수에서 읽는다.
-    docker("exec", "healer", "python", "-c",
+    docker_mon("exec", "healer", "python", "-c",
            "import os,urllib.request;urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8080/reset',"
            "method='POST',headers={'Authorization':'Bearer '+os.environ['HEALER_TOKEN']}),timeout=5)")
 
@@ -137,12 +169,25 @@ def main():
     parser.add_argument("--mode", choices=["detect", "heal"], default="detect")
     parser.add_argument("--trials", type=int, default=5)
     parser.add_argument("--container", default="pitwall_web")
+    # Zabbix 호스트명은 컨테이너명과 다를 수 있다 (예: 호스트 A-pitwall_web / 컨테이너 pitwall_web)
+    parser.add_argument("--host", default=None, help="Zabbix 호스트명 (기본: --container)")
+    parser.add_argument("--target-context", default=None, help="대상 컨테이너 호스트의 docker context")
+    parser.add_argument("--mon-context", default=None, help="healer 호스트의 docker context")
     args = parser.parse_args()
-    print(f"mode={args.mode} trials={args.trials} caffeinated={bool(os.environ.get('SYS_AIMS_CAFFEINATED'))}", flush=True)
+
+    global _TARGET_CTX, _MON_CTX
+    _TARGET_CTX, _MON_CTX = args.target_context, args.mon_context
+    zbx_host = args.host or args.container
+    print(f"mode={args.mode} trials={args.trials} host={zbx_host} container={args.container} "
+          f"target_context={_TARGET_CTX or '(local)'} mon_context={_MON_CTX or '(local)'} "
+          f"caffeinated={bool(os.environ.get('SYS_AIMS_CAFFEINATED'))}", flush=True)
 
     rows = []
     with ZabbixAPI.from_env() as api:
-        hostid = api.call("host.get", {"filter": {"host": [args.container]}, "output": ["hostid"]})[0]["hostid"]
+        found = api.call("host.get", {"filter": {"host": [zbx_host]}, "output": ["hostid"]})
+        if not found:
+            raise SystemExit(f"Zabbix host '{zbx_host}' not found — --host 를 확인하세요")
+        hostid = found[0]["hostid"]
         for n in range(1, args.trials + 1):
             wait_healthy(api, hostid)
             time.sleep(random.uniform(0, 15))

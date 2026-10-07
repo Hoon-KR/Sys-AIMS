@@ -211,6 +211,35 @@ host.get → "Zabbix server" 의 interfaces: 127.0.0.1:10050, available=2 (연�
 
 ---
 
+## 12. 서버의 `git pull` 이 분기로 실패해 수정 코드가 반영되지 않았다
+
+- **발생**: 2026-10-07, 4-E 디버깅 중. mon 에서 `git pull` 이 실패하거나 분기된 상태였고,
+  고친 코드가 서버에 없는 채로 원인을 찾고 있었습니다.
+- **원인**: mon 에서 직접 커밋한 뒤(작성자 `Ubuntu <ubuntu@ip-...>`), 맥에서 그 커밋을
+  `git am` 으로 가져와 **다른 해시**로 다시 만들고 `--force-with-lease` 로 origin 을 고쳤습니다.
+  mon 의 로컬 커밋과 origin 의 커밋은 내용이 같아도 **다른 커밋**이라 pull 이 병합하지 못합니다.
+- **해결**: mon 의 작업 트리는 버릴 수 있으므로 origin 으로 맞춥니다.
+  ```bash
+  cd ~/sys-aims && git fetch origin && git reset --hard origin/main
+  git log -1 --oneline        # origin/main 과 같은 해시인지 확인
+  ```
+  `reset --hard` 는 추적되지 않는 파일(`.env`, `.env.agent`, `nginx/auth/`)을 지우지 않습니다.
+  그래도 실행 전에 `git status --short` 로 커밋하지 않은 변경이 없는지 확인하세요.
+- **재발 방지**: **mon 에서는 커밋하지 않습니다.** 서버에서 새로 생기는 파일은
+  `zabbix/templates/` 의 export 결과뿐이므로, 맥으로 복사해 맥에서 커밋합니다.
+  ```bash
+  # ⬇️ 맥에서
+  scp 'sys-aims-mon:~/sys-aims/zabbix/templates/*' ./zabbix/templates/
+  git add zabbix/templates/ && git commit && git push
+  ```
+  서버에 GitHub 자격증명을 두지 않아도 되고(공개 저장소라 `pull` 은 인증이 필요 없음),
+  커밋 작성자가 EC2 내부 호스트명으로 찍히는 문제도 사라집니다.
+- **덧붙여**: EC2 기본 작성자 이메일(`ubuntu@ip-172-31-45-141.ap-northeast-2.compute.internal`)은
+  **사설 IP 를 담은 내부 호스트명**입니다. `common/redact()` 가 AI 전송에서 가리는 것과 같은
+  종류의 식별자이므로 공개 저장소 이력에 남기지 않는 편이 일관됩니다.
+
+---
+
 ## 참고: 컨테이너 agent에서 not supported인 아이템
 
 `Linux by Zabbix agent`를 컨테이너 agent에 적용하면 일부 아이템이 not supported가 됩니다(로컬에서 154개 중 10개).

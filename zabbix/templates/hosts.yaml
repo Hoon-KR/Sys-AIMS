@@ -3,7 +3,79 @@ zabbix_export:
   host_groups:
     - uuid: 1f8c05f2e0bf4a699b24bf0da2b80cd9
       name: Sys-AIMS
+    - uuid: 4959189ef1a042f49b5d35170ce8856b
+      name: Sys-AIMS/A
+    - uuid: ef4030645e2c4a37a70ead85a06e0819
+      name: Sys-AIMS/B
   hosts:
+    - host: A-pitwall_api
+      name: A-pitwall_api
+      templates:
+        - name: 'Sys-AIMS HTTP Service'
+      groups:
+        - name: Sys-AIMS/A
+      tags:
+        - tag: company
+          value: A
+        - tag: role
+          value: dependency
+      macros:
+        - macro: '{$HEALING.MODE}'
+          value: 'off'
+        - macro: '{$SERVICE.URL}'
+          value: 'http://172.31.9.142:8081/status.json'
+      inventory_mode: DISABLED
+    - host: A-pitwall_web
+      name: A-pitwall_web
+      templates:
+        - name: 'Sys-AIMS HTTP Service'
+      groups:
+        - name: Sys-AIMS/A
+      tags:
+        - tag: company
+          value: A
+        - tag: container
+          value: pitwall_web
+      macros:
+        - macro: '{$HEALING.MODE}'
+          value: 'off'
+        - macro: '{$SERVICE.URL}'
+          value: 'http://172.31.9.142/healthz'
+      inventory_mode: DISABLED
+    - host: B-pitwall_api
+      name: B-pitwall_api
+      templates:
+        - name: 'Sys-AIMS HTTP Service'
+      groups:
+        - name: Sys-AIMS/B
+      tags:
+        - tag: company
+          value: B
+        - tag: role
+          value: dependency
+      macros:
+        - macro: '{$HEALING.MODE}'
+          value: 'off'
+        - macro: '{$SERVICE.URL}'
+          value: 'http://172.31.9.33:8081/status.json'
+      inventory_mode: DISABLED
+    - host: B-pitwall_web
+      name: B-pitwall_web
+      templates:
+        - name: 'Sys-AIMS HTTP Service'
+      groups:
+        - name: Sys-AIMS/B
+      tags:
+        - tag: company
+          value: B
+        - tag: container
+          value: pitwall_web
+      macros:
+        - macro: '{$HEALING.MODE}'
+          value: 'off'
+        - macro: '{$SERVICE.URL}'
+          value: 'http://172.31.9.33/healthz'
+      inventory_mode: DISABLED
     - host: healer
       name: healer
       templates:
@@ -11,6 +83,8 @@ zabbix_export:
       groups:
         - name: Sys-AIMS
       tags:
+        - tag: company
+          value: internal
         - tag: role
           value: automation
       macros:
@@ -26,6 +100,8 @@ zabbix_export:
       groups:
         - name: Sys-AIMS
       tags:
+        - tag: company
+          value: internal
         - tag: role
           value: dependency
       macros:
@@ -41,6 +117,8 @@ zabbix_export:
       groups:
         - name: Sys-AIMS
       tags:
+        - tag: company
+          value: internal
         - tag: container
           value: pitwall_web
       macros:
@@ -54,6 +132,8 @@ zabbix_export:
       groups:
         - name: Sys-AIMS
       tags:
+        - tag: company
+          value: internal
         - tag: role
           value: automation
       macros:
@@ -61,6 +141,36 @@ zabbix_export:
           value: 'off'
         - macro: '{$SERVICE.URL}'
           value: 'http://rca:8081/health'
+      inventory_mode: DISABLED
+    - host: vm-a-os
+      name: vm-a-os
+      templates:
+        - name: 'Linux by Zabbix agent active'
+      groups:
+        - name: Sys-AIMS/A
+      tags:
+        - tag: company
+          value: A
+        - tag: role
+          value: host-os
+      macros:
+        - macro: '{$HEALING.MODE}'
+          value: 'off'
+      inventory_mode: DISABLED
+    - host: vm-b-os
+      name: vm-b-os
+      templates:
+        - name: 'Linux by Zabbix agent active'
+      groups:
+        - name: Sys-AIMS/B
+      tags:
+        - tag: company
+          value: B
+        - tag: role
+          value: host-os
+      macros:
+        - macro: '{$HEALING.MODE}'
+          value: 'off'
       inventory_mode: DISABLED
     - host: zabbix-agent
       name: zabbix-agent
@@ -74,6 +184,8 @@ zabbix_export:
           dns: zabbix-agent
           interface_ref: if1
       tags:
+        - tag: company
+          value: internal
         - tag: role
           value: host-os
       inventory_mode: DISABLED

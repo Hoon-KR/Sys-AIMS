@@ -80,6 +80,14 @@
         {
           "hostgroup": "Sys-AIMS",
           "permission": "2"
+        },
+        {
+          "hostgroup": "Sys-AIMS/A",
+          "permission": "2"
+        },
+        {
+          "hostgroup": "Sys-AIMS/B",
+          "permission": "2"
         }
       ]
     },

@@ -38,7 +38,7 @@ zabbix_export:
           value: pitwall_web
       macros:
         - macro: '{$HEALING.MODE}'
-          value: 'off'
+          value: auto
         - macro: '{$SERVICE.URL}'
           value: 'http://172.31.9.142/healthz'
       inventory_mode: DISABLED
@@ -72,7 +72,7 @@ zabbix_export:
           value: pitwall_web
       macros:
         - macro: '{$HEALING.MODE}'
-          value: 'off'
+          value: auto
         - macro: '{$SERVICE.URL}'
           value: 'http://172.31.9.33/healthz'
       inventory_mode: DISABLED

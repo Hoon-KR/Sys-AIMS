@@ -161,7 +161,7 @@ reporter 컨테이너가 매일 `REPORT_TIME`(기본 08:00)에 자동 생성합�
 docker exec reporter python -m daily_report.run --hours 6   # 즉시 생성 (시연용)
 sh scripts/fetch_reports.sh && open reports/index.html      # 로컬에서 보기
 ```
-자세한 내용은 [docs/daily-report.md](docs/daily-report.md), AI 신뢰 원칙은 [docs/ai-trust.md](docs/ai-trust.md)를 참고하세요.
+자세한 내용은 [docs/daily-report.md](docs/daily-report.md), AI 신뢰 원칙은 [docs/ai-trust.md](docs/ai-trust.md), 자동화의 행동 범위와 외부 AI 전송 통제는 [docs/ai-governance.md](docs/ai-governance.md)를 참고하세요.
 
 ---
 

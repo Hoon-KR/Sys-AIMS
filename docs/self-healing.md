@@ -153,7 +153,7 @@ docker cp healer:/data/events ./logs/events
 - **감지 → 재기동은 약 0.05초**입니다. 서비스 다운타임은 사실상 감지 시간과 같습니다.
   - 다운타임을 줄이려면 healer가 아니라 **감지 주기와 연속 실패 횟수**를 조정해야 합니다(오탐과의 트레이드오프, [zabbix-monitoring.md](zabbix-monitoring.md)).
 - healer 로그상 재기동에서 healthy 확인까지는 약 5초입니다. 이 5초는 pitwall_web의 Docker healthcheck 주기 때문이고, 서비스는 재기동 직후부터 응답합니다.
-- **Zabbix 기준 다운타임이 평균 21초 더 긴 것**은 [troubleshooting #4 (미해결)](troubleshooting.md)의 복구 확인 지연 때문입니다. 컨테이너는 이미 살아 있는데 Zabbix HTTP 체크가 1~3회 더 실패합니다.
+- **Zabbix 기준 다운타임이 평균 21초 더 긴 것**은 [troubleshooting #4](troubleshooting.md)의 복구 확인 지연(libcurl 네거티브 DNS 캐시 30초) 때문입니다. 컨테이너는 이미 살아 있는데 Zabbix HTTP 체크가 1~3회 더 실패합니다.
 ### EC2 실측 (2026-10-06, t3.small / Ubuntu 24.04, n=5)
 
 같은 스크립트를 EC2에서 그대로 돌린 결과입니다.
@@ -167,7 +167,7 @@ docker cp healer:/data/events ./logs/events
 - **5회 모두 사람 개입 없이 자동 복구**, Action 5/5 `sent`. EC2에서도 재현됐습니다.
 - 다운타임이 로컬보다 **4.8초 짧습니다.** 감지 시간이 Zabbix 폴링 주기 안에서 어디에 걸리는지에 따른 분산이며(로컬 15.8~32.9s, EC2 16.5~24.0s), 구조적 차이가 아닙니다.
 - **복구 확인 지연(#4)은 EC2에서도 그대로 재현**됐습니다(44.9s vs 45.8s). 로컬(Docker Desktop) 고유의 문제는 아닙니다.
-  - ~~Zabbix HTTP 체크의 재확인 때문이라는 해석이 뒷받침됩니다.~~ → **반증됨.** 같은 Zabbix 서버가 IP로 확인하는 VM-A에서는 지연이 없었습니다(아래). 원인은 **이름 해석 경로**로 좁혀집니다([troubleshooting #4](troubleshooting.md)).
+  - ~~Zabbix HTTP 체크의 재확인 때문이라는 해석이 뒷받침됩니다.~~ → **반증됨.** 같은 Zabbix 서버가 IP로 확인하는 VM-A에서는 지연이 없었습니다(아래). 원인은 **libcurl의 네거티브 DNS 캐시(30초)**로 확인했습니다([troubleshooting #4](troubleshooting.md)).
 
 ### EC2 계열사 VM-A 원격 실측 (2026-10-08, n=5)
 

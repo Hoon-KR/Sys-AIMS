@@ -166,7 +166,34 @@ docker cp healer:/data/events ./logs/events
 
 - **5회 모두 사람 개입 없이 자동 복구**, Action 5/5 `sent`. EC2에서도 재현됐습니다.
 - 다운타임이 로컬보다 **4.8초 짧습니다.** 감지 시간이 Zabbix 폴링 주기 안에서 어디에 걸리는지에 따른 분산이며(로컬 15.8~32.9s, EC2 16.5~24.0s), 구조적 차이가 아닙니다.
-- **복구 확인 지연(#4)은 EC2에서도 그대로 재현**됐습니다(44.9s vs 45.8s). 플랫폼 문제가 아니라 Zabbix HTTP 체크의 재확인 때문이라는 해석이 뒷받침됩니다.
+- **복구 확인 지연(#4)은 EC2에서도 그대로 재현**됐습니다(44.9s vs 45.8s). 로컬(Docker Desktop) 고유의 문제는 아닙니다.
+  - ~~Zabbix HTTP 체크의 재확인 때문이라는 해석이 뒷받침됩니다.~~ → **반증됨.** 같은 Zabbix 서버가 IP로 확인하는 VM-A에서는 지연이 없었습니다(아래). 원인은 **이름 해석 경로**로 좁혀집니다([troubleshooting #4](troubleshooting.md)).
+
+### EC2 계열사 VM-A 원격 실측 (2026-10-08, n=5)
+
+맥에서 docker context(`vm-a`)와 SSH 터널(18080)로 실행했습니다. 대상은 VM-A의 `pitwall_web`이고, healer는 mon에서 VM-A의 socket-proxy로 재기동합니다.
+
+| 회차 | 감지 (s) | 재기동 완료 (s) | Zabbix 복구 확인 (s) | Event ID | Action |
+|---|---|---|---|---|---|
+| 1 | 27.2 | 27.3 | 42.2 | 135 | Sys-AIMS Healer: sent |
+| 2 | 28.6 | 28.7 | 43.6 | 137 | Sys-AIMS Healer: sent |
+| 3 | 28.1 | 28.1 | 43.1 | 139 | Sys-AIMS Healer: sent |
+| 4 | 15.0 | 15.1 | 30.0 | 141 | Sys-AIMS Healer: sent |
+| 5 | 21.2 | 21.2 | 36.2 | 143 | Sys-AIMS Healer: sent |
+
+| 지표 | 평균 | 중앙값 | 최소 | 최대 |
+|---|---|---|---|---|
+| 감지 | 24.0s | 27.2s | 15.0s | 28.6s |
+| **서비스 다운타임** | **24.1s** | 27.3s | 15.1s | 28.7s |
+| Zabbix 기준 다운타임 | 39.0s | 42.2s | 30.0s | 43.6s |
+
+> 시계: 맥 `sntp time.apple.com` +13ms ±6ms, mon `chronyc tracking` NTP 대비 3µs (2026-10-08 측정). 감지 시간의 기준(t=0)은 맥 시계이므로 이 오프셋만큼의 오차가 있을 수 있으나, 비교하는 차이(초 단위)에 비해 무시할 수 있습니다.
+
+- **감지 → 재기동은 0.0~0.1초**입니다(이벤트는 mon 시계, `StartedAt`은 VM-A 시계). Action → healer → 원격 socket-proxy → 기동까지 원격 호출 비용은 무시할 수준입니다.
+- mon(20.0s)과의 차이는 15초 폴링 주기의 지터 범위 안이고, VM-A의 최소 감지 시간(15.0s)이 오히려 mon(16.5s)보다 낮아 원격 왕복으로 인한 추가 비용은 관측되지 않았습니다.
+- **Zabbix 복구 확인은 5회 모두 재기동 후 정확히 한 주기(14.9~15.0초)**였습니다. 재기동이 문제를 만든 폴링 직후에 끝나므로, 다음 폴링에서 바로 성공했다는 뜻입니다. 즉 **#4의 추가 실패가 0회**입니다.
+  mon의 pitwall_web은 Docker DNS 이름(`http://pitwall_web/healthz`)으로, VM-A는 사설 IP(`http://<VM-A IP>/healthz`)로 확인한다는 점만 다릅니다.
+- 격리: 측정 동안 mon·VM-B의 `pitwall_web` `StartedAt` 불변. healer 서킷 시도 횟수 A 1회, B·internal 0회.
 
 - 발표 수치
   - **로컬(n=5)**: "장애 발생부터 자동 복구까지 평균 24.8초, 사람 개입 0회"

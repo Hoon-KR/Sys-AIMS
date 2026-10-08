@@ -240,6 +240,34 @@ host.get → "Zabbix server" 의 interfaces: 127.0.0.1:10050, available=2 (연�
 
 ---
 
+## 13. ⚠️ 맥에서 SSH 터널이 조용히 실패해 로컬 Zabbix에 접속했다
+
+- **발생**: 2026-10-08, 5-A(VM-A 원격 측정) 준비 중. 맥에서 `scripts/measure_detection.py`를 돌리자
+  `ZABBIX_API_*` 환경변수를 서버 값으로 설정했는데도 `user.login`이 실패했습니다. 같은 코드가 mon에서는 정상이었습니다.
+- **원인**: 맥의 `127.0.0.1:8080`은 **로컬 Docker Zabbix**(`zabbix-web`)가 이미 점유하고 있습니다.
+  `ssh -L 8080:...`는 bind에 실패해도 경고 한 줄만 남기고 연결을 유지하므로, 터널이 없는 채로
+  `http://127.0.0.1:8080/api_jsonrpc.php` 요청이 전부 **로컬 Zabbix**로 갔습니다.
+  - 환경변수/`.env` 우선순위 문제는 아니었습니다. `load_env()`는 환경변수가 `.env`를 덮어씁니다.
+- **위험**: 이번에는 비밀번호가 달라 로그인 실패로 막혔지만, 같았다면 오류 없이 진행됐습니다.
+  - `zabbix_config.py`가 **운영 설정을 로컬 Zabbix에 적용**하거나,
+  - **로컬 측정값을 EC2 값으로 착각**해 문서에 남길 수 있었습니다.
+- **확인**: 터널을 열기 전에 로컬 포트가 비어 있는지 봅니다.
+  ```bash
+  lsof -nP -iTCP:8080 -sTCP:LISTEN     # com.docke… 가 보이면 로컬 Docker가 점유 중
+  ```
+  터널을 연 뒤에는 `ssh` 프로세스가 그 포트를 잡고 있는지 확인합니다(`lsof` 결과의 COMMAND가 `ssh`).
+- **해결**: 터널은 로컬 Zabbix와 겹치지 않는 **18080**으로 엽니다.
+  ```bash
+  ssh -N -o ExitOnForwardFailure=yes -L 18080:127.0.0.1:8080 sys-aims-mon
+  export ZABBIX_API_URL=http://127.0.0.1:18080/api_jsonrpc.php
+  ```
+  `ExitOnForwardFailure=yes`를 주면 bind에 실패할 때 ssh가 바로 종료되어 "조용한 실패"가 사라집니다.
+- **교훈**: 이번 건의 핵심은 포트 충돌이 아니라 **실패가 조용했다는 것**입니다.
+  터널은 항상 `ExitOnForwardFailure=yes`로 열어, 연결이 안 됐으면 그 자리에서 멈추게 합니다.
+  `~/.ssh/config`의 해당 호스트에 `ExitOnForwardFailure yes`를 넣어 두면 빠뜨릴 일이 없습니다.
+
+---
+
 ## 참고: 컨테이너 agent에서 not supported인 아이템
 
 `Linux by Zabbix agent`를 컨테이너 agent에 적용하면 일부 아이템이 not supported가 됩니다(로컬에서 154개 중 10개).

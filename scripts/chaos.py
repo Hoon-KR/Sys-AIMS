@@ -12,6 +12,14 @@ healer는 재기동 후 healthy 확인에 실패해 502를 돌려주고(Action F
 
 --watch 는 healer/rca 이벤트와 Zabbix 문제/Action 기록을 실시간으로 보여준다.
 macOS에서는 스스로 caffeinate -i 아래에서 다시 실행된다.
+
+계열사 VM (맥에서 docker context 경유, docs/adr/0002-remote-docker-access.md):
+  python3 scripts/chaos.py dependency --watch --target-context vm-a --mon-context mon
+  python3 scripts/chaos.py restore            --target-context vm-a --mon-context mon
+
+  --target-context  pitwall_web/pitwall_api 가 있는 호스트의 docker context
+  --mon-context     healer/rca 가 있는 호스트의 docker context
+  ② 의 설정 파일은 대상 호스트의 ~/sys-aims 에 SSH 로 쓰고 지운다 (conf.d 는 :ro 바인드 마운트).
 """
 
 import argparse
@@ -50,12 +58,53 @@ def sh(*args, check=True):
     return subprocess.run(args, capture_output=True, text=True, check=check).stdout.strip()
 
 
+# context 를 주면 그 호스트의 Docker API 를 쓴다 (ssh://). 비우면 로컬.
+_TARGET_CTX = None
+_MON_CTX = None
+
+
+def docker(*args, check=True):
+    """pitwall_web/pitwall_api 가 있는 호스트 (mon 자신 또는 계열사 VM)."""
+    return sh("docker", *(["--context", _TARGET_CTX] if _TARGET_CTX else []), *args, check=check)
+
+
+def docker_mon(*args, check=True):
+    """healer/rca 가 있는 호스트."""
+    return sh("docker", *(["--context", _MON_CTX] if _MON_CTX else []), *args, check=check)
+
+
+def target_ssh_host():
+    endpoint = sh("docker", "context", "inspect", _TARGET_CTX, "-f", "{{.Endpoints.docker.Host}}")
+    if not endpoint.startswith("ssh://"):
+        raise SystemExit(f"context {_TARGET_CTX} 는 ssh:// 가 아닙니다: {endpoint}")
+    return endpoint.removeprefix("ssh://")
+
+
+def write_chaos_conf():
+    if not _TARGET_CTX:
+        CHAOS_CONF.write_text(BROKEN_CONF)
+        return
+    remote = f"sys-aims/{CHAOS_CONF.relative_to(REPO_ROOT)}"
+    subprocess.run(["ssh", target_ssh_host(), f"cat > {remote}"], input=BROKEN_CONF, text=True, check=True)
+
+
+def remove_chaos_conf():
+    """주입 파일을 지웠으면 True."""
+    if not _TARGET_CTX:
+        if CHAOS_CONF.exists():
+            CHAOS_CONF.unlink()
+            return True
+        return False
+    remote = f"sys-aims/{CHAOS_CONF.relative_to(REPO_ROOT)}"
+    return sh("ssh", target_ssh_host(), f"test -f {remote} && rm {remote} && echo removed", check=False) == "removed"
+
+
 def ts(epoch=None):
     return time.strftime("%H:%M:%S", time.localtime(epoch or time.time()))
 
 
 def container_state(name):
-    return sh("docker", "inspect", "-f", "{{.State.Status}}/{{if .State.Health}}{{.State.Health.Status}}{{end}}", name, check=False)
+    return docker("inspect", "-f", "{{.State.Status}}/{{if .State.Health}}{{.State.Health.Status}}{{end}}", name, check=False)
 
 
 def wait_until(predicate, what, timeout=180):
@@ -68,39 +117,38 @@ def wait_until(predicate, what, timeout=180):
 
 
 def healer_post(path):
-    return sh("docker", "exec", "healer", "python", "-c",
+    return docker_mon("exec", "healer", "python", "-c",
               "import os,urllib.request;urllib.request.urlopen(urllib.request.Request("
               f"'http://127.0.0.1:8080{path}',method='POST',headers={{'Authorization':'Bearer '+os.environ['HEALER_TOKEN']}}),timeout=5)")
 
 
 def read_events(container, name, since):
-    raw = sh("docker", "exec", container, "sh", "-c", f"cat /data/events/{name}.jsonl 2>/dev/null || true", check=False)
+    raw = docker_mon("exec", container, "sh", "-c", f"cat /data/events/{name}.jsonl 2>/dev/null || true", check=False)
     return [r for r in (json.loads(l) for l in raw.splitlines() if l.strip()) if r.get("epoch", 0) >= since]
 
 
 # ---------------------------------------------------------------- scenarios
 def scenario_dependency():
     print(f"[{ts()}] ① 의존 서비스 장애 주입: docker stop pitwall_api")
-    sh("docker", "stop", "pitwall_api")
+    docker("stop", "pitwall_api")
 
 
 def scenario_config():
     print(f"[{ts()}] ② 설정 오류 주입: {CHAOS_CONF.relative_to(REPO_ROOT)} 작성 후 pitwall_web 재기동 (배포 흉내)")
-    CHAOS_CONF.write_text(BROKEN_CONF)
-    sh("docker", "restart", "pitwall_web", check=False)
+    write_chaos_conf()
+    docker("restart", "pitwall_web", check=False)
 
 
 def restore():
     print(f"[{ts()}] 원상 복구")
-    if CHAOS_CONF.exists():
-        CHAOS_CONF.unlink()
+    if remove_chaos_conf():
         print("  - 주입 설정 제거")
-    sh("docker", "start", "pitwall_api")
+    docker("start", "pitwall_api")
     wait_until(lambda: container_state("pitwall_api") == "running/healthy", "pitwall_api healthy")
     print("  - pitwall_api healthy")
     healer_post("/reset")
     print("  - healer 서킷 해제")
-    sh("docker", "restart", "pitwall_web")
+    docker("restart", "pitwall_web")
     wait_until(lambda: container_state("pitwall_web") == "running/healthy", "pitwall_web healthy")
     print("  - pitwall_web healthy")
     with ZabbixAPI.from_env() as api:
@@ -163,7 +211,13 @@ def main():
     parser.add_argument("--watch", action="store_true", help="주입 후 타임라인 관찰")
     parser.add_argument("--until-escalation", action="store_true", help="5분 뒤 에스컬레이션(Slack)까지 관찰")
     parser.add_argument("--since", type=float, help="watch 기준 시각 (epoch)")
+    parser.add_argument("--target-context", default=None, help="pitwall_web/pitwall_api 호스트의 docker context")
+    parser.add_argument("--mon-context", default=None, help="healer/rca 호스트의 docker context")
     args = parser.parse_args()
+
+    global _TARGET_CTX, _MON_CTX
+    _TARGET_CTX, _MON_CTX = args.target_context, args.mon_context
+    print(f"target_context={_TARGET_CTX or '(local)'} mon_context={_MON_CTX or '(local)'}", flush=True)
 
     started = time.time()
     if args.command == "restore":
